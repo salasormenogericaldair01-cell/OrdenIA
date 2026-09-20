@@ -2,15 +2,26 @@
 
 import sqlite3
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ordenia.core.file_utils import path_key
+from ordenia.core.exclusions import ExclusionPolicy
 from ordenia.core.organizer import verify_transfer
 
 from .connection import connect
-from .models import DetectedFile, Operation, WatchedFolder
+from .models import DetectedFile, IndexedEntry, Operation, WatchedFolder
 
 logger = logging.getLogger(__name__)
+
+_SORT_COLUMNS = {
+    "name": "name COLLATE NOCASE", "category": "category COLLATE NOCASE",
+    "extension": "extension COLLATE NOCASE", "size": "size",
+    "source_directory": "source_directory COLLATE NOCASE",
+    "detected_at": "detected_at", "status": "status COLLATE NOCASE",
+    "modified_at": "modified_at",
+}
 
 
 def _now() -> str:
@@ -18,15 +29,32 @@ def _now() -> str:
 
 
 def _folder(row: sqlite3.Row) -> WatchedFolder:
-    return WatchedFolder(row["id"], Path(row["path"]), bool(row["enabled"]))
+    return WatchedFolder(row["id"], Path(row["path"]), bool(row["enabled"]), bool(row["include_subfolders"]), row["destination_strategy"], Path(row["custom_destination"]) if row["custom_destination"] else None)
 
 
 def _file(row: sqlite3.Row) -> DetectedFile:
-    return DetectedFile(row["id"], row["watched_folder_id"], Path(row["path"]), Path(row["source_directory"]), row["name"], row["extension"], row["size"], row["category"], row["detected_at"], row["modified_at"], row["status"])
+    return DetectedFile(row["id"], row["watched_folder_id"], Path(row["path"]), row["path_key"], Path(row["source_directory"]), row["name"], row["extension"], row["size"], row["category"], row["detected_at"], row["modified_at"], row["status"], row["index_state"])
 
 
 def _operation(row: sqlite3.Row) -> Operation:
     return Operation(row["id"], row["file_id"], Path(row["original_path"]), Path(row["destination_path"]), row["created_at"], row["operation_type"], row["status"], row["error_message"], row["undone_at"], Path(row["restored_path"]) if row["restored_path"] else None)
+
+
+_UPSERT_FILE = """
+    INSERT INTO files(watched_folder_id, path, path_key, source_directory, name, extension,
+                      size, category, detected_at, modified_at, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pendiente')
+    ON CONFLICT(path_key) DO UPDATE SET
+        path = excluded.path, source_directory = excluded.source_directory,
+        name = excluded.name, extension = excluded.extension,
+        size = excluded.size, category = excluded.category, modified_at = excluded.modified_at,
+        index_state = 'active'
+"""
+
+
+def _file_values(folder_id: int, entry: IndexedEntry, detected_at: str) -> tuple[object, ...]:
+    path = Path(os.path.abspath(entry.path.expanduser()))
+    return (folder_id, str(path), path_key(path), str(path.parent), path.name, path.suffix.lower(), entry.size, entry.category, detected_at, entry.modified_at)
 
 
 class Repository:
@@ -42,12 +70,16 @@ class Repository:
                     path TEXT NOT NULL UNIQUE,
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
                     removed INTEGER NOT NULL DEFAULT 0 CHECK(removed IN (0, 1)),
+                    include_subfolders INTEGER NOT NULL DEFAULT 1 CHECK(include_subfolders IN (0, 1)),
+                    destination_strategy TEXT NOT NULL DEFAULT 'inside',
+                    custom_destination TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS files (
                     id INTEGER PRIMARY KEY,
                     watched_folder_id INTEGER NOT NULL REFERENCES watched_folders(id),
                     path TEXT NOT NULL UNIQUE,
+                    path_key TEXT NOT NULL UNIQUE,
                     source_directory TEXT NOT NULL,
                     name TEXT NOT NULL,
                     extension TEXT NOT NULL,
@@ -56,7 +88,9 @@ class Repository:
                     detected_at TEXT NOT NULL,
                     modified_at TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'Pendiente'
-                        CHECK(status IN ('Pendiente', 'Organizado', 'Ignorado'))
+                        CHECK(status IN ('Pendiente', 'Organizado', 'Ignorado')),
+                    index_state TEXT NOT NULL DEFAULT 'active'
+                        CHECK(index_state IN ('active', 'missing', 'excluded'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_files_detected ON files(detected_at DESC);
                 CREATE TABLE IF NOT EXISTS operations (
@@ -76,16 +110,39 @@ class Repository:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS managed_destinations (
+                    path TEXT PRIMARY KEY,
+                    added_at TEXT NOT NULL
+                );
             """)
             db.execute("BEGIN IMMEDIATE")
             folder_columns = {row["name"] for row in db.execute("PRAGMA table_info(watched_folders)")}
             if "removed" not in folder_columns:
                 db.execute("ALTER TABLE watched_folders ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+            if "include_subfolders" not in folder_columns:
+                db.execute("ALTER TABLE watched_folders ADD COLUMN include_subfolders INTEGER NOT NULL DEFAULT 1")
+            if "destination_strategy" not in folder_columns:
+                db.execute("ALTER TABLE watched_folders ADD COLUMN destination_strategy TEXT NOT NULL DEFAULT 'inside'")
+            if "custom_destination" not in folder_columns:
+                db.execute("ALTER TABLE watched_folders ADD COLUMN custom_destination TEXT")
             file_columns = {row["name"] for row in db.execute("PRAGMA table_info(files)")}
+            if "index_state" not in file_columns:
+                db.execute("ALTER TABLE files ADD COLUMN index_state TEXT NOT NULL DEFAULT 'active' CHECK(index_state IN ('active', 'missing', 'excluded'))")
             if "source_directory" not in file_columns:
                 db.execute("ALTER TABLE files ADD COLUMN source_directory TEXT NOT NULL DEFAULT ''")
                 for row in db.execute("SELECT id, path FROM files"):
                     db.execute("UPDATE files SET source_directory = ? WHERE id = ?", (str(Path(row["path"]).parent), row["id"]))
+            if "path_key" not in file_columns:
+                db.execute("ALTER TABLE files ADD COLUMN path_key TEXT")
+                known_keys: set[str] = set()
+                for row in db.execute("SELECT id, path FROM files"):
+                    key = path_key(Path(row["path"]))
+                    if key in known_keys:
+                        logger.warning("Ruta duplicada en la base antigua: archivo %s", row["id"])
+                        key = f"{key}#legacy-{row['id']}"
+                    known_keys.add(key)
+                    db.execute("UPDATE files SET path_key = ? WHERE id = ?", (key, row["id"]))
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_files_path_key ON files(path_key)")
             operation_columns = {row["name"] for row in db.execute("PRAGMA table_info(operations)")}
             if "status" not in operation_columns:
                 db.execute("ALTER TABLE operations ADD COLUMN status TEXT NOT NULL DEFAULT 'Completado' CHECK(status IN ('Completado', 'Deshecho', 'Fallido'))")
@@ -100,25 +157,64 @@ class Repository:
                         except OSError:
                             db.execute("UPDATE operations SET status = 'Fallido' WHERE id = ?", (row["id"],))
                             if row["operation_type"] == "move":
-                                db.execute("UPDATE files SET path = ?, name = ?, status = 'Pendiente' WHERE id = ? AND path = ? AND status = 'Organizado'", (str(original), original.name, row["file_id"], str(destination)))
+                                try:
+                                    db.execute("UPDATE files SET path = ?, path_key = ?, name = ?, status = 'Pendiente' WHERE id = ? AND path = ? AND status = 'Organizado'", (str(original), path_key(original), original.name, row["file_id"], str(destination)))
+                                except sqlite3.IntegrityError:
+                                    db.execute("UPDATE files SET status = 'Pendiente' WHERE id = ? AND status = 'Organizado'", (row["file_id"],))
+                                    logger.warning("La ruta original ya está ocupada por otro registro: operación %s", row["id"])
                             logger.warning("Operación antigua no verificable: %s", row["id"])
             if "error_message" not in operation_columns:
                 db.execute("ALTER TABLE operations ADD COLUMN error_message TEXT")
                 db.execute("UPDATE operations SET error_message = 'No se pudo verificar el movimiento registrado por la versión anterior.' WHERE status = 'Fallido' AND error_message IS NULL")
 
+            db.execute("CREATE INDEX IF NOT EXISTS idx_files_index_state_folder ON files(index_state, watched_folder_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_operations_file_id ON operations(file_id)")
+
     def list_folders(self) -> list[WatchedFolder]:
         with connect(self.db_path) as db:
             return [_folder(row) for row in db.execute("SELECT * FROM watched_folders WHERE removed = 0 ORDER BY path COLLATE NOCASE")]
 
-    def add_folder(self, path: Path) -> WatchedFolder:
+    def is_folder_listed(self, folder_id: int) -> bool:
+        with connect(self.db_path) as db:
+            return db.execute("SELECT 1 FROM watched_folders WHERE id = ? AND removed = 0", (folder_id,)).fetchone() is not None
+
+    def add_folder(
+        self, path: Path, include_subfolders: bool = True,
+        destination_strategy: str = "inside", custom_destination: Path | None = None,
+    ) -> WatchedFolder:
         normalized = path.resolve()
         if not normalized.is_dir():
             raise NotADirectoryError(normalized)
         with connect(self.db_path) as db:
-            db.execute("INSERT INTO watched_folders(path, enabled, removed, created_at) VALUES (?, 1, 0, ?) ON CONFLICT(path) DO UPDATE SET enabled = 1, removed = 0", (str(normalized), _now()))
+            db.execute("""INSERT INTO watched_folders(path, enabled, removed, include_subfolders, destination_strategy, custom_destination, created_at)
+                VALUES (?, 1, 0, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET
+                enabled = 1, removed = 0, include_subfolders = excluded.include_subfolders,
+                destination_strategy = excluded.destination_strategy, custom_destination = excluded.custom_destination""",
+                (str(normalized), int(include_subfolders), destination_strategy, str(custom_destination.resolve()) if custom_destination else None, _now()))
             row = db.execute("SELECT * FROM watched_folders WHERE path = ?", (str(normalized),)).fetchone()
             assert row is not None
             return _folder(row)
+
+    def update_folder(
+        self, folder_id: int, include_subfolders: bool,
+        destination_strategy: str, custom_destination: Path | None,
+    ) -> WatchedFolder:
+        with connect(self.db_path) as db:
+            cursor = db.execute("""UPDATE watched_folders SET include_subfolders = ?, destination_strategy = ?, custom_destination = ?
+                WHERE id = ? AND removed = 0""", (int(include_subfolders), destination_strategy, str(custom_destination.resolve()) if custom_destination else None, folder_id))
+            if cursor.rowcount != 1:
+                raise LookupError("Carpeta no encontrada.")
+            row = db.execute("SELECT * FROM watched_folders WHERE id = ?", (folder_id,)).fetchone()
+            assert row is not None
+            return _folder(row)
+
+    def register_managed_root(self, path: Path) -> None:
+        with connect(self.db_path) as db:
+            db.execute("INSERT OR IGNORE INTO managed_destinations(path, added_at) VALUES (?, ?)", (str(path.resolve()), _now()))
+
+    def list_managed_roots(self) -> tuple[Path, ...]:
+        with connect(self.db_path) as db:
+            return tuple(Path(row["path"]) for row in db.execute("SELECT path FROM managed_destinations"))
 
     def set_folder_enabled(self, folder_id: int, enabled: bool) -> None:
         if enabled and not self.get_folder(folder_id).path.is_dir():
@@ -133,21 +229,140 @@ class Repository:
 
     def upsert_file(self, folder_id: int, path: Path, size: int, category: str, modified_at: str) -> DetectedFile:
         now = _now()
+        entry = IndexedEntry(path, size, category, modified_at)
         with connect(self.db_path) as db:
-            db.execute("""
-                INSERT INTO files(watched_folder_id, path, source_directory, name, extension, size, category, detected_at, modified_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pendiente')
-                ON CONFLICT(path) DO UPDATE SET
-                    name = excluded.name, extension = excluded.extension, size = excluded.size,
-                    category = excluded.category, modified_at = excluded.modified_at
-            """, (folder_id, str(path), str(path.parent), path.name, path.suffix.lower(), size, category, now, modified_at))
-            row = db.execute("SELECT * FROM files WHERE path = ?", (str(path),)).fetchone()
+            db.execute(_UPSERT_FILE, _file_values(folder_id, entry, now))
+            row = db.execute("SELECT * FROM files WHERE path_key = ?", (path_key(path),)).fetchone()
             assert row is not None
             return _file(row)
+
+    def upsert_files_batch(self, folder_id: int, entries: list[IndexedEntry]) -> tuple[int, int]:
+        if not entries:
+            return (0, 0)
+        now = _now()
+        with connect(self.db_path) as db:
+            keys = [path_key(entry.path) for entry in entries]
+            existing = sum(db.execute("SELECT 1 FROM files WHERE path_key = ?", (key,)).fetchone() is not None for key in keys)
+            db.executemany(_UPSERT_FILE, (_file_values(folder_id, entry, now) for entry in entries))
+            return (len(entries) - existing, existing)
 
     def list_files(self) -> list[DetectedFile]:
         with connect(self.db_path) as db:
             return [_file(row) for row in db.execute("SELECT * FROM files ORDER BY detected_at DESC, id DESC")]
+
+    def reconcile_folder(self, folder: WatchedFolder, managed_roots: tuple[Path, ...], *, check_missing: bool = True) -> dict[str, int]:
+        """Retain historical rows while classifying their current index state."""
+        policy = ExclusionPolicy()
+        with connect(self.db_path) as db:
+            rows = db.execute("""SELECT f.id, f.path, f.status, f.index_state,
+                EXISTS(SELECT 1 FROM operations o WHERE o.file_id = f.id AND o.operation_type = 'move'
+                    AND o.status = 'Completado' AND o.destination_path = f.path) AS verified_move
+                FROM files f WHERE f.watched_folder_id = ?""", (folder.id,)).fetchall()
+            changes: list[tuple[str, int]] = []
+            counts = {"active": 0, "missing": 0, "excluded": 0}
+            for row in rows:
+                path = Path(row["path"])
+                verified_organized = row["status"] == "Organizado" and bool(row["verified_move"])
+                if policy.excluded_name(path) or path.is_symlink():
+                    state = "excluded"
+                elif not verified_organized and not policy.eligible_path(
+                    path, folder.path, folder.include_subfolders, managed_roots, assume_regular=True
+                ):
+                    state = "excluded" if path == folder.path or folder.path in path.parents else "missing"
+                elif check_missing and not path.is_file():
+                    state = "missing"
+                else:
+                    state = "active" if check_missing or row["index_state"] != "missing" else "missing"
+                counts[state] += 1
+                if state != row["index_state"]:
+                    changes.append((state, row["id"]))
+            db.executemany("UPDATE files SET index_state = ? WHERE id = ?", changes)
+            counts["changed"] = len(changes)
+            return counts
+
+    def reconcile_external_move(self, folder: WatchedFolder, source: Path, destination: Path,
+                                managed_roots: tuple[Path, ...], entry: IndexedEntry | None) -> bool:
+        """Follow an external rename using the same row when history permits it."""
+        with connect(self.db_path) as db:
+            row = db.execute("SELECT * FROM files WHERE path_key = ?", (path_key(source),)).fetchone()
+            if row is None:
+                return False
+            if row["status"] == "Organizado" and db.execute(
+                "SELECT 1 FROM operations WHERE file_id = ? AND status = 'Completado' AND operation_type = 'move'", (row["id"],)
+            ).fetchone():
+                db.execute("UPDATE files SET index_state = 'missing' WHERE id = ?", (row["id"],))
+                return True
+            eligible_path = ExclusionPolicy().eligible_path(
+                destination, folder.path, folder.include_subfolders, managed_roots, assume_regular=True)
+            state = "active" if eligible_path and entry is not None else "missing" if eligible_path else "excluded" if folder.path in destination.parents else "missing"
+            if db.execute("SELECT 1 FROM files WHERE path_key = ? AND id != ?", (path_key(destination), row["id"])).fetchone():
+                db.execute("UPDATE files SET index_state = 'missing' WHERE id = ?", (row["id"],))
+                return True
+            if state == "missing":
+                db.execute("UPDATE files SET index_state = 'missing' WHERE id = ?", (row["id"],))
+                return True
+            db.execute("""UPDATE files SET path = ?, path_key = ?, source_directory = ?, name = ?, extension = ?,
+                size = ?, category = ?, modified_at = ?, index_state = ? WHERE id = ?""",
+                (str(destination), path_key(destination), str(destination.parent), destination.name, destination.suffix.lower(),
+                 entry.size if entry else row["size"], entry.category if entry else row["category"],
+                 entry.modified_at if entry else row["modified_at"], state, row["id"]))
+            return True
+
+    @staticmethod
+    def _filter_clause(search: str, status: str, category: str) -> tuple[str, list[str]]:
+        clauses: list[str] = ["index_state = 'active'"]
+        values: list[str] = []
+        if search.strip():
+            term = search.strip().casefold()
+            clauses.append("(INSTR(CASEFOLD(name), ?) > 0 OR INSTR(CASEFOLD(extension), ?) > 0 OR INSTR(CASEFOLD(category), ?) > 0 OR INSTR(CASEFOLD(path), ?) > 0 OR INSTR(CASEFOLD(source_directory), ?) > 0)")
+            values.extend([term] * 5)
+        if status != "Todos":
+            clauses.append("status = ?")
+            values.append(status)
+        if category != "Todas":
+            clauses.append("category = ?")
+            values.append(category)
+        return (" WHERE " + " AND ".join(clauses) if clauses else "", values)
+
+    def search_files(
+        self, search: str = "", status: str = "Todos", category: str = "Todas",
+        sort_by: str = "detected_at", descending: bool = True,
+        limit: int = 200, offset: int = 0,
+    ) -> tuple[list[DetectedFile], int]:
+        where, values = self._filter_clause(search, status, category)
+        column = _SORT_COLUMNS.get(sort_by, _SORT_COLUMNS["detected_at"])
+        direction = "DESC" if descending else "ASC"
+        with connect(self.db_path) as db:
+            total = db.execute("SELECT COUNT(*) FROM files" + where, values).fetchone()[0]
+            rows = db.execute(f"SELECT * FROM files{where} ORDER BY {column} {direction}, id DESC LIMIT ? OFFSET ?", (*values, max(1, limit), max(0, offset)))
+            return [_file(row) for row in rows], total
+
+    def count_by_category(self) -> dict[str, int]:
+        with connect(self.db_path) as db:
+            return {row["category"]: row["count"] for row in db.execute("SELECT category, COUNT(*) AS count FROM files WHERE index_state = 'active' GROUP BY category")}
+
+    def dashboard_counts(self) -> dict[str, int]:
+        today = datetime.now().astimezone().date().isoformat()
+        with connect(self.db_path) as db:
+            row = db.execute("""SELECT COUNT(*) AS total,
+                SUM(CASE WHEN detected_at LIKE ? THEN 1 ELSE 0 END) AS today,
+                SUM(CASE WHEN status = 'Pendiente' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status = 'Organizado' THEN 1 ELSE 0 END) AS organized
+                FROM files WHERE index_state = 'active'""", (today + "%",)).fetchone()
+            return {"total": row["total"], "today": row["today"] or 0, "pending": row["pending"] or 0, "organized": row["organized"] or 0}
+
+    def recent_files(self, limit: int = 6) -> list[DetectedFile]:
+        with connect(self.db_path) as db:
+            return [_file(row) for row in db.execute("SELECT * FROM files WHERE index_state = 'active' ORDER BY detected_at DESC, id DESC LIMIT ?", (limit,))]
+
+    def registered_counts(self) -> dict[int, int]:
+        with connect(self.db_path) as db:
+            return {row["watched_folder_id"]: row["count"] for row in db.execute("SELECT watched_folder_id, COUNT(*) AS count FROM files WHERE index_state = 'active' GROUP BY watched_folder_id")}
+
+    def index_counts(self, folder_id: int) -> dict[str, int]:
+        with connect(self.db_path) as db:
+            return {row["index_state"]: row["count"] for row in db.execute(
+                "SELECT index_state, COUNT(*) AS count FROM files WHERE watched_folder_id = ? GROUP BY index_state", (folder_id,))}
 
     def get_file(self, file_id: int) -> DetectedFile:
         with connect(self.db_path) as db:
@@ -172,7 +387,7 @@ class Repository:
     def record_move(self, file_id: int, original: Path, destination: Path) -> None:
         verify_transfer(original, destination)
         with connect(self.db_path) as db:
-            cursor = db.execute("UPDATE files SET path = ?, name = ?, status = 'Organizado' WHERE id = ? AND path = ? AND status = 'Pendiente'", (str(destination), destination.name, file_id, str(original)))
+            cursor = db.execute("UPDATE files SET path = ?, path_key = ?, name = ?, status = 'Organizado', index_state = 'active' WHERE id = ? AND path = ? AND status = 'Pendiente' AND index_state = 'active'", (str(destination), path_key(destination), destination.name, file_id, str(original)))
             if cursor.rowcount != 1:
                 raise ValueError("El archivo ya no está pendiente en la ruta original.")
             db.execute("INSERT INTO operations(file_id, original_path, destination_path, created_at, operation_type, status) VALUES (?, ?, ?, ?, 'move', 'Completado')", (file_id, str(original), str(destination), _now()))
@@ -183,7 +398,7 @@ class Repository:
 
     def repair_pending_path(self, file_id: int, restored: Path) -> None:
         with connect(self.db_path) as db:
-            db.execute("UPDATE files SET path = ?, name = ? WHERE id = ? AND status = 'Pendiente'", (str(restored), restored.name, file_id))
+            db.execute("UPDATE files SET path = ?, path_key = ?, name = ? WHERE id = ? AND status = 'Pendiente'", (str(restored), path_key(restored), restored.name, file_id))
 
     def record_undo(self, operation: Operation, restored: Path) -> None:
         verify_transfer(operation.destination_path, restored)
@@ -192,7 +407,7 @@ class Repository:
             cursor = db.execute("UPDATE operations SET status = 'Deshecho', undone_at = ?, restored_path = ? WHERE id = ? AND status = 'Completado' AND undone_at IS NULL", (now, str(restored), operation.id))
             if cursor.rowcount != 1:
                 raise ValueError("Esta operación ya fue deshecha.")
-            updated = db.execute("UPDATE files SET path = ?, name = ?, status = 'Pendiente' WHERE id = ? AND path = ? AND status = 'Organizado'", (str(restored), restored.name, operation.file_id, str(operation.destination_path)))
+            updated = db.execute("UPDATE files SET path = ?, path_key = ?, name = ?, status = 'Pendiente', index_state = 'active' WHERE id = ? AND path = ? AND status = 'Organizado'", (str(restored), path_key(restored), restored.name, operation.file_id, str(operation.destination_path)))
             if updated.rowcount != 1:
                 raise ValueError("El archivo ya no coincide con el movimiento registrado.")
             db.execute("INSERT INTO operations(file_id, original_path, destination_path, created_at, operation_type, status) VALUES (?, ?, ?, ?, 'undo', 'Completado')", (operation.file_id, str(operation.destination_path), str(restored), now))

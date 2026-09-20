@@ -11,6 +11,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path, timeout=10)
     connection.row_factory = sqlite3.Row
+    connection.create_function("CASEFOLD", 1, lambda value: str(value).casefold(), deterministic=True)
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 10000")
     try:

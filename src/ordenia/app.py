@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from ordenia import __version__
 from ordenia.database.repositories import Repository
 from ordenia.services.file_service import FileService
 from ordenia.ui.main_window import MainWindow
@@ -23,6 +24,7 @@ def run() -> int:
     logging.basicConfig(filename=directory / "ordenia.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     app = QApplication(sys.argv)
     app.setApplicationName("OrdenIA")
+    app.setApplicationVersion(__version__)
     repository = Repository(directory / "ordenia.sqlite3")
     service = FileService(repository)
     window = MainWindow(repository, service)

@@ -1,53 +1,73 @@
 # OrdenIA
 
-OrdenIA es una aplicación de escritorio para Windows que vigila carpetas elegidas por el usuario y sugiere dónde clasificar los archivos. Funciona localmente. La versión **V0.1** usa reglas por extensión; todavía no utiliza inteligencia artificial.
+## Consistencia del índice en V0.2
 
-## Estado actual: V0.1
+**Analizar ahora** registra archivos nuevos y reconcilia los existentes. El resumen separa archivos encontrados por el escáner, nuevos, ya registrados, activos, ausentes y excluidos. El escáner omite destinos administrados por OrdenIA; un archivo organizado en uno de esos destinos sigue siendo un registro activo asociado a su carpeta vigilada. Por ello, el total de activos puede superar el total encontrado durante el análisis.
 
-- Vigila en tiempo real carpetas activadas con `watchdog`, incluidas sus subcarpetas.
-- Detecta archivos nuevos y modificados cuando su tamaño y fecha dejan de cambiar brevemente.
-- Ignora carpetas y archivos temporales comunes, y evita volver a detectar los archivos dentro de `OrdenIA/`.
-- Clasifica por extensión en Documentos, Hojas de cálculo, Presentaciones, Imágenes, Videos, Audio, Comprimidos, Código, Instaladores y Otros.
-- Muestra archivos, estado, estadísticas e historial en una interfaz oscura con PySide6.
-- Propone un destino `<carpeta vigilada>/OrdenIA/<Categoría>/` y **solo mueve tras una confirmación explícita**.
-- Verifica que el archivo llegue al destino y desaparezca del origen antes de registrar una operación como **Completado**. Los intentos fallidos quedan como **Fallido** sin cambiar el archivo a Organizado.
-- Evita reemplazar nombres existentes mediante sufijos `(1)`, `(2)`, etc.; permite deshacer movimientos si el archivo sigue en destino. El movimiento original cambia a **Deshecho**.
-- Al pulsar una ruta en Archivos detectados o Historial, copia la ruta completa al portapapeles. El tooltip muestra la ruta completa aunque la tabla la recorte.
-- Guarda carpetas, archivos, movimientos y preferencias en SQLite. Las carpetas eliminadas se ocultan, pero se conserva su referencia para el historial.
+SQLite conserva las filas y operaciones históricas. La migración agrega `files.index_state` (`active`, `missing`, `excluded`) sin borrar datos; el estado visible (`Pendiente`, `Organizado`, `Ignorado`) sigue separado. Al abrir la aplicación se ocultan registros heredados que incumplen la política de exclusión; **Analizar ahora** comprueba además si los archivos siguen presentes. Las vistas normales y las estadísticas muestran solamente activos. El tooltip de **Archivos registrados** desglosa activos, ausentes y excluidos. Ninguna reconciliación borra archivos físicos.
 
-OrdenIA no elimina archivos ni organiza automáticamente. No analiza contenido, no busca mediante lenguaje natural y no se conecta a servicios externos.
+Los eventos de renombre externo de watchdog conservan el mismo ID cuando la operación puede seguirse con seguridad. Si un archivo previamente organizado se mueve externamente, se conserva su historial y el registro anterior queda ausente; la nueva ubicación se indexa por separado si es elegible. Los movimientos internos siguen coordinados con el watcher.
+
+OrdenIA es una aplicación de escritorio local para Windows que registra, clasifica y ayuda a organizar archivos con aprobación del usuario. La **V0.2** incorpora escaneo de carpetas existentes, búsqueda y destinos configurables. No utiliza IA ni servicios externos.
+
+## Funciones de V0.2
+
+- Vigilancia en tiempo real con `watchdog` y escaneo manual o inicial de archivos ya existentes.
+- Recursividad configurable por carpeta. El escaneo y la vigilancia usan la misma política de exclusión.
+- Progreso durante el escaneo en segundo plano; los archivos solo se registran y clasifican, nunca se mueven durante el análisis.
+- Destino por carpeta: `OrdenIA/` dentro de la vigilada, biblioteca central configurable o carpeta personalizada.
+- Búsqueda mientras se escribe por nombre, extensión, categoría y ruta; filtros combinables por estado y categoría.
+- Tabla ordenable y paginada, panel de detalles, tooltips, copia de rutas completas y apertura de ubicación en Explorer.
+- Doble clic para abrir con la aplicación predeterminada; los instaladores `.exe` y `.msi` piden confirmación.
+- Inicio con estadísticas por categoría, actividad reciente y una guía para añadir la primera carpeta.
+- Organización **solo con confirmación manual**, nombres libres sin sobrescritura, verificación física, historial y Deshacer.
 
 ## Requisitos e instalación
 
-- Windows y Python **3.12 o posterior**.
-- PowerShell (los comandos también se pueden adaptar a otra terminal).
+- Windows y Python 3.12 o posterior. La aplicación también degrada las acciones de abrir ubicación en macOS y Linux.
+- PowerShell para los ejemplos.
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
-```
-
-Si no hay Python 3.12, puedes crear el entorno con `python -m venv .venv` usando otra versión compatible posterior. La instalación editable trae PySide6 y watchdog; el extra `dev` añade pytest.
-
-## Ejecutar
-
-```powershell
 ordenia
 ```
 
-O bien:
+Si tu equipo tiene otra versión compatible de Python, crea el entorno con `python -m venv .venv`. Para ejecutar sin el comando instalado: `python -m ordenia.main`.
 
-```powershell
-python -m ordenia.main
-```
+## Actualizar desde V0.1
 
-En **Carpetas vigiladas**, añade cualquier carpeta con el selector. Solo los eventos que ocurran mientras esté activa se registran; esta versión no hace un escaneo histórico al añadirla. En **Archivos detectados**, selecciona un pendiente y confirma **Organizar** para moverlo. En **Historial**, selecciona el movimiento y pulsa **Deshacer** para restaurarlo. Si la ruta original ya contiene otro archivo, la restauración elige un nombre libre.
+Mantén tu base de datos. Al abrir V0.2, SQLite añade las columnas de recursividad, destino y clave de ruta sin borrar archivos, preferencias ni historial. La base y el log continúan en `%LOCALAPPDATA%\OrdenIA\`. Si una carpeta vigilada ya existía en V0.1, conserva el destino dentro de esa carpeta y la vigilancia recursiva. Usa **Editar** para cambiar estas opciones y **Analizar ahora** para indexar archivos anteriores a la actualización.
 
-La base SQLite de la V0.1 anterior se migra al abrirla. Las operaciones antiguas sin verificación física se marcan como **Fallido** si el destino no existe o todavía existe el origen; no se borran archivos ni registros.
+## Uso
 
-La base de datos y el log se guardan en `%LOCALAPPDATA%\OrdenIA\` (o en `~/AppData/Local/OrdenIA` si la variable no existe). No hace falta elegir una ruta fija como Escritorio o Descargas.
+1. En **Carpetas vigiladas**, pulsa **Añadir carpeta**, elige recursividad y destino, y guarda.
+2. Si hay archivos existentes, elige **Analizar archivos**. **Omitir** deja la carpeta vigilada sin escanear el contenido anterior; **Cancelar** cancela la incorporación de la carpeta. Puedes usar **Analizar ahora** más tarde.
+3. En **Archivos detectados**, combina búsqueda y filtros. Selecciona una fila para revisar nombre, ruta, fechas, estado y destino sugerido.
+4. Pulsa **Organizar** y confirma el destino. OrdenIA moverá el archivo solo entonces. En **Historial**, **Deshacer** intenta restaurarlo con un nombre libre si el original está ocupado.
+
+El botón **Copiar ruta** y las celdas de ruta copian la ruta completa al portapapeles. **Abrir ubicación** selecciona el archivo en Explorer cuando está disponible.
+
+## Exclusiones
+
+Escáner y watcher ignoran `desktop.ini`, `Thumbs.db`, `ehthumbs.db`, `.DS_Store`, nombres `~$*`, temporales como `.tmp`, `.temp`, `.part` y `.crdownload`, y directorios `$RECYCLE.BIN`, `System Volume Information`, `__pycache__`, `.git`, `.venv`, `node_modules` y los destinos administrados por OrdenIA. No se siguen enlaces simbólicos.
+
+## Arquitectura y seguridad
+
+| Módulo | Responsabilidad |
+| --- | --- |
+| `core/` | Clasificación, exclusiones, destinos y movimientos sin sobrescritura |
+| `database/` | Esquema, migración y consultas SQLite |
+| `monitoring/` | Eventos del sistema de archivos |
+| `scanning/` | Recorrido de archivos existentes sin leer su contenido |
+| `services/` | Casos de uso, lotes y coordinación de hilos |
+| `platform/` | Abrir archivos y ubicaciones según el sistema operativo |
+| `ui/` | Ventana, páginas y widgets PySide6 |
+
+Los registros usan una **clave de ruta normalizada** como identidad. Tamaño y fecha de modificación se actualizan si cambia el mismo archivo; no se calculan hashes. Escáner y watcher pueden detectar simultáneamente la misma ruta, pero SQLite conserva una sola fila. Las escrituras del escáner se hacen en lotes de 200 y la tabla presenta 200 resultados por página, por lo que no necesita cargar 10.000 filas en un widget. El escaneo, el conteo y los movimientos trabajan fuera del hilo de la UI; señales de Qt comunican progreso y cambios.
+
+Ningún escaneo mueve archivos. Cada organización necesita confirmación explícita. Antes de registrar **Completado**, se verifica que el destino existe y el origen ya no. Los fallos quedan en el historial y los movimientos completados pueden deshacerse mientras el archivo siga en su destino. No se sobrescriben nombres existentes.
 
 ## Tests
 
@@ -55,33 +75,18 @@ La base de datos y el log se guardan en `%LOCALAPPDATA%\OrdenIA\` (o en `~/AppDa
 python -m pytest
 ```
 
-## Arquitectura
+Los tests usan carpetas temporales para escaneo, exclusiones, destinos, búsqueda, migración, movimientos, Deshacer, watchdog y UI sin pantalla.
 
-| Área | Responsabilidad |
-| --- | --- |
-| `src/ordenia/core/` | Reglas de clasificación, validaciones y movimientos seguros |
-| `src/ordenia/database/` | Esquema, modelos y repositorio SQLite |
-| `src/ordenia/monitoring/` | Eventos de watchdog y espera de estabilidad en segundo plano |
-| `src/ordenia/services/` | Casos de uso y coordinación entre hilos, archivos y base de datos |
-| `src/ordenia/ui/` | Ventana, páginas y componentes PySide6 |
-| `tests/` | Clasificación, colisiones, movimientos, reversión y persistencia |
+## Limitaciones y roadmap
 
-El watcher y los movimientos trabajan fuera del hilo de la interfaz. La interfaz se actualiza mediante señales de Qt. El motor de clasificación expone un protocolo para cambiar las reglas por un clasificador futuro.
-
-## Limitaciones actuales
-
-- La clasificación se basa solo en la extensión; no comprueba el contenido.
-- No hay indexación de archivos ya existentes ni búsqueda avanzada.
-- Si una copia está en curso más de unos segundos, se omite ese evento; una modificación posterior puede volver a detectarla.
-- Deshacer requiere que el archivo permanezca en el destino registrado.
-- No incluye instalador ejecutable; se ejecuta desde Python.
-
-## Roadmap
+- La clasificación sigue basada solo en la extensión; no analiza contenido ni calcula hashes.
+- Una carpeta inaccesible puede producir omisiones registradas en el log. Un cierre abrupto entre mover el archivo y escribir SQLite todavía puede requerir revisión manual.
+- No hay instalador ejecutable ni organización automática.
 
 | Versión | Objetivo |
 | --- | --- |
-| V0.1 | Monitorización y organización manual |
-| V0.2 | Análisis de contenido |
+| V0.1 | Monitorización y organización manual — completado |
+| V0.2 | Escaneo, destinos, búsqueda y UX — actual |
 | V0.3 | IA local |
 | V0.4 | Búsqueda semántica |
 | V0.5 | Detección de duplicados |

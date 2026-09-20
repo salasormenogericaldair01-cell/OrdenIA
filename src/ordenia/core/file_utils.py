@@ -1,6 +1,7 @@
 """Validaciones y nombres libres para movimientos seguros."""
 
 from pathlib import Path
+import os
 
 TEMP_SUFFIXES = frozenset({".tmp", ".part", ".crdownload", ".download", ".swp", ".swo", ".bak"})
 
@@ -36,3 +37,8 @@ def is_inside(path: Path, directory: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def path_key(path: Path) -> str:
+    """Stable identity by normalized path; content changes retain the same row."""
+    return os.path.normcase(os.path.abspath(path.expanduser()))

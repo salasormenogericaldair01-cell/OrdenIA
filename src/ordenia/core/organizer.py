@@ -72,20 +72,21 @@ def _move_without_replacing(source: Path, target: Path) -> Path:
 
 
 class Organizer:
-    def proposed_destination(self, source: Path, watched_root: Path, category: str) -> Path:
+    def proposed_destination(self, source: Path, watched_root: Path, category: str, destination_root: Path | None = None) -> Path:
         if not is_inside(source, watched_root):
             raise ValueError("El archivo no pertenece a la carpeta vigilada.")
         if is_inside(source, watched_root / "OrdenIA"):
             raise ValueError("El archivo ya está dentro de OrdenIA.")
-        destination = watched_root / "OrdenIA" / category / source.name
-        if not is_inside(destination, watched_root):
-            raise ValueError("El destino sale de la carpeta vigilada.")
+        base = destination_root or watched_root / "OrdenIA"
+        if is_inside(source, base):
+            raise ValueError("El archivo ya está dentro del destino de OrdenIA.")
+        destination = base / category / source.name
         return available_path(destination)
 
-    def move(self, source: Path, watched_root: Path, category: str) -> Path:
+    def move(self, source: Path, watched_root: Path, category: str, destination_root: Path | None = None) -> Path:
         if not source.is_file() or source.is_symlink():
             raise FileNotFoundError(source)
-        destination = self.proposed_destination(source, watched_root, category)
+        destination = self.proposed_destination(source, watched_root, category, destination_root)
         return _move_without_replacing(source, destination)
 
     def undo(self, destination: Path, original: Path) -> Path:

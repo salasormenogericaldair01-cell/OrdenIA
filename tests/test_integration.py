@@ -20,6 +20,7 @@ def test_watcher_detects_new_file_and_skips_temporary(tmp_path: Path) -> None:
     try:
         time.sleep(0.3)
         (watched / "download.part").write_text("temporary")
+        (watched / "desktop.ini").write_text("system")
         (watched / "report.pdf").write_text("ready")
         assert detected.wait(6), "watchdog no notificó el archivo nuevo"
         files = repository.list_files()
@@ -44,7 +45,7 @@ def test_window_can_open_and_close_offscreen(tmp_path: Path, monkeypatch) -> Non
     try:
         window.show()
         app.processEvents()
-        assert window.windowTitle() == "OrdenIA · V0.1"
+        assert window.windowTitle() == "OrdenIA · V0.2"
         assert window.stack.count() == 5
     finally:
         window.close()

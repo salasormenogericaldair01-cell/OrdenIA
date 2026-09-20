@@ -98,3 +98,36 @@ def test_migration_marks_unverified_legacy_move_failed_without_deleting_data(tmp
     assert repository.get_file(1).status == "Pendiente"
     assert repository.get_file(1).path == original
     assert Repository(database).get_operation(1).status == "Fallido"
+
+
+def test_v01_database_migrates_without_losing_files_or_operations(tmp_path: Path) -> None:
+    database = tmp_path / "ordenia.sqlite3"
+    root = tmp_path / "watched"
+    root.mkdir()
+    source = root / "report.pdf"
+    destination = root / "OrdenIA" / "Documentos" / source.name
+    destination.parent.mkdir(parents=True)
+    destination.write_text("old user data")
+    with sqlite3.connect(database) as db:
+        db.executescript("""
+            CREATE TABLE watched_folders (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, enabled INTEGER NOT NULL, removed INTEGER NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE files (id INTEGER PRIMARY KEY, watched_folder_id INTEGER NOT NULL, path TEXT UNIQUE NOT NULL, source_directory TEXT NOT NULL, name TEXT NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, category TEXT NOT NULL, detected_at TEXT NOT NULL, modified_at TEXT NOT NULL, status TEXT NOT NULL);
+            CREATE TABLE operations (id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, original_path TEXT NOT NULL, destination_path TEXT NOT NULL, created_at TEXT NOT NULL, operation_type TEXT NOT NULL, status TEXT NOT NULL, error_message TEXT, undone_at TEXT, restored_path TEXT);
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """)
+        db.execute("INSERT INTO watched_folders VALUES (1, ?, 1, 0, '2026-01-01')", (str(root),))
+        db.execute("INSERT INTO files VALUES (1, 1, ?, ?, ?, '.pdf', 13, 'Documentos', '2026-01-01', '2026-01-01', 'Organizado')", (str(destination), str(root), source.name))
+        db.execute("INSERT INTO operations VALUES (1, 1, ?, ?, '2026-01-01', 'move', 'Completado', NULL, NULL, NULL)", (str(source), str(destination)))
+        db.execute("INSERT INTO settings VALUES ('show_notifications', '0')")
+    repository = Repository(database)
+    assert destination.read_text() == "old user data"
+    assert repository.get_file(1).status == "Organizado"
+    assert repository.get_file(1).path == destination
+    assert repository.get_file(1).path_key
+    assert repository.get_operation(1).status == "Completado"
+    assert repository.get_setting("show_notifications") == "0"
+    folder = repository.get_folder(1)
+    assert folder.include_subfolders is True
+    assert folder.destination_strategy == "inside"
+    assert folder.custom_destination is None
+    assert Repository(database).get_file(1).id == 1
