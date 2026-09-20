@@ -1,8 +1,9 @@
 """Searchable, paged file list with details and explicit actions."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QTableWidgetItem, QVBoxLayout, QWidget
 
+from ordenia.analysis.text_utils import preview
 from ordenia.core.classifier import ExtensionClassifier
 from ordenia.database.models import DetectedFile
 from ordenia.database.repositories import Repository
@@ -15,6 +16,9 @@ class FilesPage(QWidget):
     PAGE_SIZE = 200
     SORT_FIELDS = ("name", "category", "extension", "size", "source_directory", "detected_at", "status", "modified_at")
     STATUS_FILTERS = {"Todos": "Todos", "Pendientes": "Pendiente", "Organizados": "Organizado", "Ignorados": "Ignorado"}
+    ANALYSIS_LABELS = {"pending": "Pendiente", "analyzing": "Analizando", "indexed": "Indexado",
+                       "unsupported": "No compatible", "no_text": "Sin texto", "failed": "Error",
+                       "stale": "Desactualizado", "skipped": "Omitido"}
 
     def __init__(self, repository: Repository, service: FileService) -> None:
         super().__init__()
@@ -23,7 +27,11 @@ class FilesPage(QWidget):
         self.page_index = 0
         self.sort_field = "detected_at"
         self.descending = True
+        self._content_job_id = 0
+        self._content_cancelled = False
         content, layout = page("Archivos detectados", "Busca, filtra y revisa los detalles antes de mover archivos.")
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(8)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(content)
@@ -33,6 +41,12 @@ class FilesPage(QWidget):
         self.search_box.setPlaceholderText("Buscar archivos...")
         self.search_box.setClearButtonEnabled(True)
         self.search_box.textChanged.connect(self._reset_and_refresh)
+        self.search_name = QCheckBox("Nombre y ruta")
+        self.search_name.setChecked(True)
+        self.search_name.toggled.connect(self._reset_and_refresh)
+        self.search_content = QCheckBox("Contenido")
+        self.search_content.setChecked(True)
+        self.search_content.toggled.connect(self._reset_and_refresh)
         self.status_filter = QComboBox()
         self.status_filter.addItems(self.STATUS_FILTERS)
         self.status_filter.currentTextChanged.connect(self._reset_and_refresh)
@@ -41,13 +55,25 @@ class FilesPage(QWidget):
         self.category_filter.currentTextChanged.connect(self._reset_and_refresh)
         clear = QPushButton("Limpiar filtros")
         clear.clicked.connect(self.clear_filters)
+        analyze_results = QPushButton("Analizar resultados")
+        analyze_results.clicked.connect(self._analyze_filtered)
         controls.addWidget(self.search_box, 2)
-        controls.addWidget(self.status_filter)
-        controls.addWidget(self.category_filter)
-        controls.addWidget(clear)
+        controls.addWidget(self.search_name)
+        controls.addWidget(self.search_content)
         layout.addLayout(controls)
+        filters = QGridLayout()
+        filters.addWidget(QLabel("Estado:"), 0, 0)
+        filters.addWidget(self.status_filter, 0, 1)
+        filters.addWidget(QLabel("Categoría:"), 1, 0)
+        filters.addWidget(self.category_filter, 1, 1)
+        filters.addWidget(clear, 2, 0)
+        filters.addWidget(analyze_results, 2, 1)
+        filters.setColumnStretch(1, 1)
+        filters.setVerticalSpacing(4)
+        layout.addLayout(filters)
 
-        self.table = table(["Nombre", "Categoría", "Extensión", "Tamaño", "Carpeta origen", "Fecha detectada", "Estado", "Última modificación"], path_columns=(4,))
+        self.table = table(["Nombre", "Categoría", "Extensión", "Tamaño", "Carpeta origen", "Fecha detectada", "Estado", "Última modificación", "Coincidencia"], path_columns=(4,))
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.horizontalHeader().sectionClicked.connect(self._sort_by_column)
         self.table.currentCellChanged.connect(self._update_details)
         self.table.cellDoubleClicked.connect(self._open_selected_file)
@@ -69,11 +95,30 @@ class FilesPage(QWidget):
             value = QLabel("—")
             value.setWordWrap(True)
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            grid.addWidget(title, index // 2, (index % 2) * 2)
-            grid.addWidget(value, index // 2, (index % 2) * 2 + 1)
+            grid.addWidget(title, index, 0)
+            grid.addWidget(value, index, 1)
             self.detail_values[label] = value
         details_layout.addLayout(grid)
-        actions = QHBoxLayout()
+        content_heading = QLabel("ANÁLISIS DE CONTENIDO")
+        content_heading.setObjectName("sectionTitle")
+        details_layout.addWidget(content_heading)
+        content_grid = QGridLayout()
+        self.analysis_values: dict[str, QLabel] = {}
+        for index, label in enumerate(("Estado", "Extractor", "Analizado", "Páginas", "Diapositivas", "Caracteres", "Título", "Autor", "Asunto", "Palabras clave detectadas")):
+            title = QLabel(label + ":")
+            title.setObjectName("muted")
+            value = QLabel("—")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            content_grid.addWidget(title, index, 0)
+            content_grid.addWidget(value, index, 1)
+            self.analysis_values[label] = value
+        details_layout.addLayout(content_grid)
+        self.content_preview = QLabel("")
+        self.content_preview.setWordWrap(True)
+        self.content_preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        details_layout.addWidget(self.content_preview)
+        actions = QGridLayout()
         self.organize_button = QPushButton("Organizar")
         self.organize_button.setObjectName("primaryButton")
         self.organize_button.clicked.connect(self._organize)
@@ -83,11 +128,20 @@ class FilesPage(QWidget):
         copy.clicked.connect(self._copy_selected_path)
         locate = QPushButton("Abrir ubicación")
         locate.clicked.connect(self._open_location)
-        for button in (self.organize_button, ignore, copy, locate):
-            actions.addWidget(button)
-        actions.addStretch()
+        self.analyze_button = QPushButton("Analizar contenido")
+        self.analyze_button.clicked.connect(self._analyze_selected)
+        for row, column, button in ((0, 0, self.organize_button), (0, 1, ignore),
+                                    (1, 0, copy), (1, 1, locate)):
+            actions.addWidget(button, row, column)
+        actions.addWidget(self.analyze_button, 2, 0, 1, 2)
+        actions.setColumnStretch(0, 1)
+        actions.setColumnStretch(1, 1)
         details_layout.addLayout(actions)
-        splitter.addWidget(details)
+        details_scroll = QScrollArea()
+        details_scroll.setWidgetResizable(True)
+        details_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        details_scroll.setWidget(details)
+        splitter.addWidget(details_scroll)
         splitter.setSizes([430, 250])
         layout.addWidget(splitter, 1)
 
@@ -101,12 +155,26 @@ class FilesPage(QWidget):
         following.clicked.connect(lambda: self._change_page(1))
         self.previous_button = previous
         self.next_button = following
-        pagination.addWidget(self.result_label)
+        layout.addWidget(self.result_label)
         pagination.addStretch()
         pagination.addWidget(previous)
         pagination.addWidget(self.page_label)
         pagination.addWidget(following)
         layout.addLayout(pagination)
+        analysis_progress = QHBoxLayout()
+        self.content_progress_label = QLabel("")
+        self.content_progress_label.setObjectName("muted")
+        self.content_progress = QProgressBar()
+        self.content_progress.hide()
+        self.cancel_content_button = QPushButton("Cancelar análisis")
+        self.cancel_content_button.clicked.connect(self._cancel_content)
+        self.cancel_content_button.hide()
+        analysis_progress.addWidget(self.content_progress_label)
+        analysis_progress.addWidget(self.content_progress, 1)
+        analysis_progress.addWidget(self.cancel_content_button)
+        layout.addLayout(analysis_progress)
+        self.service.content.progress.connect(self._on_content_progress)
+        self.service.content.finished.connect(self._on_content_finished)
         self.refresh()
 
     def _selected_id(self) -> int | None:
@@ -123,6 +191,8 @@ class FilesPage(QWidget):
         self.refresh()
 
     def _sort_by_column(self, column: int) -> None:
+        if column >= len(self.SORT_FIELDS):
+            return
         field = self.SORT_FIELDS[column]
         self.descending = not self.descending if self.sort_field == field else False
         self.sort_field = field
@@ -200,12 +270,66 @@ class FilesPage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "OrdenIA", str(exc))
 
+    def _analyze_selected(self) -> None:
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        ids = [int(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)) for row in rows if self.table.item(row, 0)]
+        if not ids:
+            file = self._selected_file()
+            ids = [file.id] if file else []
+        if not ids:
+            QMessageBox.information(self, "OrdenIA", "Selecciona uno o varios archivos.")
+            return
+        self._content_job_id = self.service.analyze_content(ids, force=True)
+        if self._content_job_id:
+            self._content_cancelled = False
+            self._on_content_progress(self._content_job_id, 0, len(ids))
+
+    def _analyze_filtered(self) -> None:
+        ids = self.repository.matching_file_ids(
+            self.search_box.text(), self.STATUS_FILTERS[self.status_filter.currentText()],
+            self.category_filter.currentText(), self.search_name.isChecked(), self.search_content.isChecked())
+        if not ids:
+            QMessageBox.information(self, "OrdenIA", "No hay archivos en los resultados actuales.")
+            return
+        self._content_job_id = self.service.analyze_content(ids)
+        if self._content_job_id:
+            self._content_cancelled = False
+            self._on_content_progress(self._content_job_id, 0, len(ids))
+
+    def _cancel_content(self) -> None:
+        if self._content_job_id:
+            self._content_cancelled = True
+            self.service.cancel_content(self._content_job_id)
+            self.content_progress_label.setText("Cancelando después del archivo actual...")
+
+    def _on_content_progress(self, job_id: int, done: int, total: int) -> None:
+        if job_id != self._content_job_id:
+            return
+        self.content_progress_label.setText(f"Analizando contenido: {done} / {total}")
+        self.content_progress.setRange(0, max(1, total))
+        self.content_progress.setValue(done)
+        self.content_progress.show()
+        self.cancel_content_button.show()
+
+    def _on_content_finished(self, job_id: int, done: int, total: int) -> None:
+        if job_id == self._content_job_id:
+            self.content_progress_label.setText("Análisis cancelado; los trabajos restantes no se iniciaron." if self._content_cancelled
+                                                else f"Análisis de contenido terminado: {done} / {total}")
+            self.content_progress.hide()
+            self.cancel_content_button.hide()
+            self._content_job_id = 0
+            self.refresh()
+
     def _update_details(self, *_args) -> None:
         file = self._selected_file()
         if file is None:
             for value in self.detail_values.values():
                 value.setText("—")
+            for value in self.analysis_values.values():
+                value.setText("—")
+            self.content_preview.setText("")
             self.organize_button.setEnabled(False)
+            self.analyze_button.setEnabled(False)
             return
         destination = "—"
         if file.status == "Pendiente":
@@ -225,6 +349,23 @@ class FilesPage(QWidget):
             self.detail_values[label].setText(value)
             self.detail_values[label].setToolTip(value)
         self.organize_button.setEnabled(file.status == "Pendiente")
+        self.analyze_button.setEnabled(True)
+        analysis = self.repository.content.get(file.id)
+        analysis_values = {
+            "Estado": self.ANALYSIS_LABELS.get(analysis.status, analysis.status),
+            "Extractor": analysis.extractor or "—", "Analizado": display_date(analysis.analyzed_at) if analysis.analyzed_at else "—",
+            "Páginas": str(analysis.page_count) if analysis.page_count is not None else "—",
+            "Diapositivas": str(analysis.slide_count) if analysis.slide_count is not None else "—",
+            "Caracteres": f"{analysis.character_count:,}".replace(",", "."),
+            "Título": analysis.title or "—", "Autor": analysis.author or "—", "Asunto": analysis.subject or "—",
+            "Palabras clave detectadas": ", ".join(analysis.keywords) or "—",
+        }
+        for label, value in analysis_values.items():
+            self.analysis_values[label].setText(value)
+            self.analysis_values[label].setToolTip(value)
+        self.content_preview.setText(("Vista previa: " + preview(analysis.text)) if analysis.text and analysis.status == "indexed"
+                                     else analysis.error or "Aún no se ha analizado el contenido.")
+        self.analyze_button.setText("Reanalizar" if analysis.status not in {"pending", "analyzing"} else "Analizar contenido")
 
     def refresh(self) -> None:
         selected_id = self._selected_id()
@@ -232,6 +373,7 @@ class FilesPage(QWidget):
             self.search_box.text(), self.STATUS_FILTERS[self.status_filter.currentText()],
             self.category_filter.currentText(), self.sort_field, self.descending,
             self.PAGE_SIZE, self.page_index * self.PAGE_SIZE,
+            self.search_name.isChecked(), self.search_content.isChecked(),
         )
         if not files and total and self.page_index:
             self.page_index = (total - 1) // self.PAGE_SIZE
@@ -241,12 +383,14 @@ class FilesPage(QWidget):
             self.table.setRowCount(len(files))
             selected_row = -1
             for row, file in enumerate(files):
-                values = [file.name, file.category, file.extension or "—", display_size(file.size), str(file.source_directory), display_date(file.detected_at), file.status, display_date(file.modified_at)]
+                values = [file.name, file.category, file.extension or "—", display_size(file.size), str(file.source_directory), display_date(file.detected_at), file.status, display_date(file.modified_at), file.match_snippet]
                 for column, value in enumerate(values):
                     item = path_item(file.source_directory) if column == 4 else QTableWidgetItem(value)
                     if column == 0:
                         item.setData(Qt.ItemDataRole.UserRole, file.id)
                         item.setToolTip(file.name)
+                    if column == 8 and file.match_snippet:
+                        item.setToolTip(file.match_snippet)
                     self.table.setItem(row, column, item)
                 if file.id == selected_id:
                     selected_row = row

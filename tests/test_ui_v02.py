@@ -36,7 +36,7 @@ def test_ui_search_filters_and_details(tmp_path: Path, monkeypatch) -> None:
         assert page.table.rowCount() == 3
         page.table.horizontalHeader().sectionClicked.emit(0)
         assert page.table.item(0, 0).text() == "Otro.pdf"
-        assert window.windowTitle() == "OrdenIA · V0.2"
+        assert window.windowTitle() == "OrdenIA · V0.3"
         app.processEvents()
     finally:
         window.close()
@@ -61,7 +61,7 @@ def test_adding_folder_can_scan_existing_files_asynchronously(tmp_path: Path, mo
         assert not repository.list_folders()
         service.add_folder(root)
         deadline = time.monotonic() + 8
-        while len(repository.list_files()) < 1 and time.monotonic() < deadline:
+        while (len(repository.list_files()) < 1 or window.pages[1].table.rowCount() < 1) and time.monotonic() < deadline:
             app.processEvents()
             time.sleep(0.02)
         app.processEvents()

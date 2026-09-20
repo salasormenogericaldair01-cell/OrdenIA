@@ -41,11 +41,13 @@ class _Handler(FileSystemEventHandler):
 
 
 class FolderWatcher:
-    def __init__(self, repository: Repository, classifier: Classifier, on_file: Callable[[], None]) -> None:
+    def __init__(self, repository: Repository, classifier: Classifier, on_file: Callable[[], None],
+                 on_indexed: Callable[[int], None] | None = None) -> None:
         self.repository = repository
         self.classifier = classifier
         self.policy = ExclusionPolicy()
         self.on_file = on_file
+        self.on_indexed = on_indexed
         self.observer = Observer()
         self._watches: dict[int, tuple[ObservedWatch, WatchedFolder]] = {}
         self._managed_roots: tuple[Path, ...] = ()
@@ -113,8 +115,10 @@ class FolderWatcher:
                     elif self.policy.eligible_path(path, current.path, current.include_subfolders, self._managed_roots) and self._wait_stable(path):
                         stat = path.stat()
                         modified = datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds")
-                        self.repository.upsert_file(folder.id, path, stat.st_size, self.classifier.classify(path), modified)
+                        indexed = self.repository.upsert_file(folder.id, path, stat.st_size, self.classifier.classify(path), modified, stat.st_mtime_ns)
                         self.on_file()
+                        if self.on_indexed:
+                            self.on_indexed(indexed.id)
             except (OSError, LookupError, ValueError):
                 logger.exception("No se pudo analizar %s", path)
             finally:
@@ -128,10 +132,12 @@ class FolderWatcher:
         if eligible and self._wait_stable(destination):
             stat = destination.stat()
             modified = datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds")
-            entry = IndexedEntry(destination, stat.st_size, self.classifier.classify(destination), modified)
+            entry = IndexedEntry(destination, stat.st_size, self.classifier.classify(destination), modified, stat.st_mtime_ns)
         handled = self.repository.reconcile_external_move(folder, source, destination, self._managed_roots, entry)
         if entry is not None:
-            self.repository.upsert_file(folder.id, entry.path, entry.size, entry.category, entry.modified_at)
+            indexed = self.repository.upsert_file(folder.id, entry.path, entry.size, entry.category, entry.modified_at, entry.mtime_ns)
+            if self.on_indexed:
+                self.on_indexed(indexed.id)
         if handled or entry is not None:
             self.on_file()
 

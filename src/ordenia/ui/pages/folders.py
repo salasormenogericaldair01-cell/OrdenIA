@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QGridLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidgetItem, QVBoxLayout, QWidget
 
 from ordenia.database.repositories import Repository
 from ordenia.database.models import ScanSummary
@@ -17,13 +17,13 @@ class FoldersPage(QWidget):
         super().__init__()
         self.repository = repository
         self.service = service
-        content, layout = page("Carpetas vigiladas", "Configura la vigilancia, el escaneo y el destino de cada carpeta.")
+        content, layout = page("Carpetas vigiladas", "Elige para cada carpeta un destino interno, la biblioteca central o una ruta personalizada.")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(content)
         self.table = table(["Carpeta", "Estado", "Subcarpetas", "Destino", "Archivos registrados"])
         layout.addWidget(self.table)
-        actions = QHBoxLayout()
+        actions = QGridLayout()
         add = QPushButton("Añadir carpeta")
         add.setObjectName("primaryButton")
         add.clicked.connect(self._add)
@@ -35,9 +35,11 @@ class FoldersPage(QWidget):
         scan.clicked.connect(self._scan)
         remove = QPushButton("Eliminar de la lista")
         remove.clicked.connect(self._remove)
-        for button in (add, edit, toggle, scan, remove):
-            actions.addWidget(button)
-        actions.addStretch()
+        for row, column, button in ((0, 0, add), (0, 1, edit), (1, 0, toggle),
+                                    (1, 1, scan), (2, 0, remove)):
+            actions.addWidget(button, row, column)
+        actions.setColumnStretch(0, 1)
+        actions.setColumnStretch(1, 1)
         layout.addLayout(actions)
         self.progress_label = QLabel("")
         self.progress_label.setObjectName("muted")
@@ -66,7 +68,7 @@ class FoldersPage(QWidget):
         if any(folder.path == path for folder in self.repository.list_folders()):
             QMessageBox.information(self, "OrdenIA", "Esta carpeta ya está en la lista. Puedes editarla o analizarla ahora.")
             return
-        dialog = FolderOptionsDialog(path, parent=self)
+        dialog = FolderOptionsDialog(path, parent=self, central_root=self.service.central_destination())
         if not dialog.exec():
             return
         try:
@@ -83,7 +85,7 @@ class FoldersPage(QWidget):
             QMessageBox.information(self, "OrdenIA", "Selecciona una carpeta.")
             return
         folder = self.repository.get_folder(folder_id)
-        dialog = FolderOptionsDialog(folder.path, folder, self)
+        dialog = FolderOptionsDialog(folder.path, folder, self, central_root=self.service.central_destination())
         if dialog.exec():
             try:
                 self.service.update_folder(folder.id, *dialog.values())

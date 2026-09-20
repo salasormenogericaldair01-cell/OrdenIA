@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from ordenia.database.repositories import Repository
+from ordenia.core.destinations import destination_directory
 from ordenia.services.file_service import FileService
 
 
@@ -70,3 +71,13 @@ def test_custom_destination_cannot_contain_entire_watched_root(tmp_path: Path) -
         assert service.repository.list_folders() == []
     finally:
         service.close()
+
+
+def test_destination_directory_supports_future_nested_groups_without_escaping(tmp_path: Path) -> None:
+    root = tmp_path / "OrdenIA"
+    assert destination_directory(root, "Documentos") == root / "Documentos"
+    assert destination_directory(root, Path("Proyectos") / "Tacho Inteligente") == root / "Proyectos" / "Tacho Inteligente"
+    with pytest.raises(ValueError):
+        destination_directory(root, Path("..") / "fuera")
+    with pytest.raises(ValueError):
+        destination_directory(root, tmp_path / "fuera")

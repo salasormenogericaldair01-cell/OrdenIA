@@ -48,7 +48,7 @@ class MainWindow(QMainWindow):
         self.repository = repository
         self.service = service
         self.setWindowTitle(f"OrdenIA · V{__version__.rsplit('.', 1)[0]}")
-        self.setMinimumSize(1000, 620)
+        self.setMinimumSize(820, 480)
         self.resize(1240, 760)
         self.setStyleSheet(STYLESHEET)
 

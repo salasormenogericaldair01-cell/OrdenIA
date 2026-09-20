@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from .file_utils import available_path, is_inside
+from .destinations import destination_directory
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class Organizer:
         base = destination_root or watched_root / "OrdenIA"
         if is_inside(source, base):
             raise ValueError("El archivo ya está dentro del destino de OrdenIA.")
-        destination = base / category / source.name
+        destination = destination_directory(base, category) / source.name
         return available_path(destination)
 
     def move(self, source: Path, watched_root: Path, category: str, destination_root: Path | None = None) -> Path:

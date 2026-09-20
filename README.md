@@ -1,31 +1,54 @@
-# OrdenIA
+# OrdenIA V0.3
 
-## Consistencia del índice en V0.2
+OrdenIA es una aplicación de escritorio para Windows que vigila carpetas, ayuda a organizar archivos con confirmación manual y ahora permite **buscar dentro de documentos**. La extracción de contenido es local y determinista; no utiliza modelos de IA.
 
-**Analizar ahora** registra archivos nuevos y reconcilia los existentes. El resumen separa archivos encontrados por el escáner, nuevos, ya registrados, activos, ausentes y excluidos. El escáner omite destinos administrados por OrdenIA; un archivo organizado en uno de esos destinos sigue siendo un registro activo asociado a su carpeta vigilada. Por ello, el total de activos puede superar el total encontrado durante el análisis.
+## Privacidad
 
-SQLite conserva las filas y operaciones históricas. La migración agrega `files.index_state` (`active`, `missing`, `excluded`) sin borrar datos; el estado visible (`Pendiente`, `Organizado`, `Ignorado`) sigue separado. Al abrir la aplicación se ocultan registros heredados que incumplen la política de exclusión; **Analizar ahora** comprueba además si los archivos siguen presentes. Las vistas normales y las estadísticas muestran solamente activos. El tooltip de **Archivos registrados** desglosa activos, ausentes y excluidos. Ninguna reconciliación borra archivos físicos.
+- El contenido se procesa en el equipo del usuario.
+- No se utilizan APIs ni se envían documentos a Internet.
+- El texto extraído y el índice de búsqueda se guardan en la base SQLite local, en `%LOCALAPPDATA%\OrdenIA\`.
+- Quien tenga acceso a esa base podrá leer el texto indexado. Protege la cuenta de Windows y sus copias de seguridad como protegerías los documentos originales.
 
-Los eventos de renombre externo de watchdog conservan el mismo ID cuando la operación puede seguirse con seguridad. Si un archivo previamente organizado se mueve externamente, se conserva su historial y el registro anterior queda ausente; la nueva ubicación se indexa por separado si es elegible. Los movimientos internos siguen coordinados con el watcher.
+## Funciones
 
-OrdenIA es una aplicación de escritorio local para Windows que registra, clasifica y ayuda a organizar archivos con aprobación del usuario. La **V0.2** incorpora escaneo de carpetas existentes, búsqueda y destinos configurables. No utiliza IA ni servicios externos.
+- Vigila carpetas con `watchdog` y puede analizar archivos existentes, con o sin subcarpetas.
+- Excluye archivos temporales, archivos del sistema y destinos administrados. **Analizar ahora** reconcilia archivos ausentes o excluidos sin borrar historial.
+- Clasifica por extensión y propone destinos dentro de la carpeta vigilada, en una biblioteca central o en una carpeta personalizada. Al añadir o editar una carpeta se muestran las tres rutas y un ejemplo del destino propuesto.
+- Solo mueve archivos tras confirmación explícita; verifica el movimiento, evita sobrescrituras y permite **Deshacer**.
+- Busca por nombre/ruta y por contenido, con filtros de estado y categoría, paginación y fragmentos cortos de coincidencia.
+- Muestra estado del análisis, metadatos, palabras clave detectadas mediante frecuencias locales y una vista previa. Son heurísticas, no resúmenes de IA.
+- Permite analizar uno o varios archivos en segundo plano con progreso y cancelación. La cancelación detiene los trabajos aún no iniciados.
 
-## Funciones de V0.2
+## Formatos de contenido
 
-- Vigilancia en tiempo real con `watchdog` y escaneo manual o inicial de archivos ya existentes.
-- Recursividad configurable por carpeta. El escaneo y la vigilancia usan la misma política de exclusión.
-- Progreso durante el escaneo en segundo plano; los archivos solo se registran y clasifican, nunca se mueven durante el análisis.
-- Destino por carpeta: `OrdenIA/` dentro de la vigilada, biblioteca central configurable o carpeta personalizada.
-- Búsqueda mientras se escribe por nombre, extensión, categoría y ruta; filtros combinables por estado y categoría.
-- Tabla ordenable y paginada, panel de detalles, tooltips, copia de rutas completas y apertura de ubicación en Explorer.
-- Doble clic para abrir con la aplicación predeterminada; los instaladores `.exe` y `.msi` piden confirmación.
-- Inicio con estadísticas por categoría, actividad reciente y una guía para añadir la primera carpeta.
-- Organización **solo con confirmación manual**, nombres libres sin sobrescritura, verificación física, historial y Deshacer.
+| Tipo | Extensiones | Datos extraídos |
+| --- | --- | --- |
+| PDF | `.pdf` | Texto página por página, páginas, título, autor y asunto; sin OCR |
+| Word | `.docx` | Párrafos, encabezados, tablas y propiedades básicas |
+| Excel | `.xlsx` | Nombres de hojas y valores de celdas; `read_only`, sin evaluar fórmulas |
+| PowerPoint | `.pptx` | Texto de diapositivas, formas, tablas y notas disponibles |
+| Texto | `.txt`, `.md`, `.log`, `.csv` | Contenido textual |
+| Código | `.py`, `.js`, `.ts`, `.tsx`, `.jsx`, `.java`, `.c`, `.cpp`, `.h`, `.hpp`, `.ino`, `.html`, `.css`, `.json`, `.yaml`, `.yml`, `.toml`, `.sql`, `.sh`, `.ps1`, `.bat`, `.xml` | Contenido como texto; nunca se ejecuta |
 
-## Requisitos e instalación
+Los formatos heredados `.doc`, `.xls` y `.ppt` pueden registrarse y organizarse, pero indican **«No compatible con análisis de contenido en V0.3»**. Un PDF sin texto extraíble muestra ese estado sin tratarlo como error fatal. Los PDF dañados o cifrados muestran una razón de fallo. No hay OCR ni conversión con otras aplicaciones.
 
-- Windows y Python 3.12 o posterior. La aplicación también degrada las acciones de abrir ubicación en macOS y Linux.
-- PowerShell para los ejemplos.
+## Límites y estados
+
+El análisis manual admite archivos de hasta **50 MB**; para `.docx`, `.xlsx` y `.pptx` el límite es **20 MB**, con un máximo de **100 MB descomprimidos** y **10.000 entradas** por archivo Office. Se guardan como máximo **250.000 caracteres** por archivo; los extractores limitan además PDF a **250 páginas**, PPTX a **300 diapositivas** y XLSX a **50.000 celdas y 200 columnas por hoja**. Cuando se llega a un límite, el resultado indica truncamiento u omisión. Los archivos grandes no se cargan completos deliberadamente.
+
+Los estados del contenido son **Pendiente**, **Analizando**, **Indexado**, **Sin texto**, **No compatible**, **Omitido**, **Error** y **Desactualizado**. Son independientes de Pendiente/Organizado/Ignorado y de activo/ausente/excluido. Un cambio de tamaño o fecha de modificación de alta precisión invalida el contenido anterior y lo retira de los resultados hasta reanalizarlo. Organizar y Deshacer conservan el índice cuando el archivo no cambió.
+
+En **Configuración**, el análisis automático de nuevos archivos compatibles está **desactivado por defecto**. Puede activarse y fijarse un máximo entre 1 y 50 MB; siguen aplicando los límites generales. Hay dos workers de extracción para evitar miles de hilos. El análisis de archivos ya existentes solo se solicita mediante el flujo de escaneo o la acción manual; el escaneo nunca mueve archivos.
+
+## Búsqueda local
+
+La barra de **Archivos detectados** permite combinar **Nombre y ruta** y **Contenido**. Para buscar solo dentro de documentos, desmarca Nombre y ruta. Por ejemplo, `ESP32`, `sensor ultrasónico`, `inventario` o `"gestión de residuos"` pueden encontrar archivos cuyo nombre no contiene esos términos, siempre que su contenido ya esté indexado. Los filtros de categoría y estado se mantienen.
+
+SQLite FTS5 indexa texto y metadatos cuando está disponible; esta distribución de Python lo incluye. OrdenIA guarda el texto una sola vez en `file_analysis` y usa FTS5 con contenido externo. Si otro SQLite no trae FTS5, la búsqueda sigue funcionando mediante comparación textual local, con menor rendimiento. Los registros desactualizados, ausentes o excluidos no aparecen en los resultados normales.
+
+## Instalación y ejecución
+
+Requiere Python 3.12 o posterior. Ejemplo en PowerShell:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -34,64 +57,41 @@ python -m pip install -e ".[dev]"
 ordenia
 ```
 
-Si tu equipo tiene otra versión compatible de Python, crea el entorno con `python -m venv .venv`. Para ejecutar sin el comando instalado: `python -m ordenia.main`.
+También puedes ejecutar `python -m ordenia.main`. Para los tests: `python -m pytest`.
 
-## Actualizar desde V0.1
+## Uso del análisis
 
-Mantén tu base de datos. Al abrir V0.2, SQLite añade las columnas de recursividad, destino y clave de ruta sin borrar archivos, preferencias ni historial. La base y el log continúan en `%LOCALAPPDATA%\OrdenIA\`. Si una carpeta vigilada ya existía en V0.1, conserva el destino dentro de esa carpeta y la vigilancia recursiva. Usa **Editar** para cambiar estas opciones y **Analizar ahora** para indexar archivos anteriores a la actualización.
+1. Añade una carpeta vigilada y acepta analizar los archivos existentes, o pulsa **Analizar ahora** más tarde.
+2. En **Archivos detectados**, selecciona una o varias filas y pulsa **Analizar contenido**. Puedes cancelar los análisis aún pendientes de la cola.
+3. Revisa estado, extractor, metadatos, palabras clave y vista previa en los detalles. **Reanalizar** actualiza un archivo tras cambios o fallos.
+4. Busca con la opción **Contenido** activada. OrdenIA consulta el índice SQLite, no vuelve a abrir cada documento durante la búsqueda.
 
-## Uso
+## Migración desde V0.2
 
-1. En **Carpetas vigiladas**, pulsa **Añadir carpeta**, elige recursividad y destino, y guarda.
-2. Si hay archivos existentes, elige **Analizar archivos**. **Omitir** deja la carpeta vigilada sin escanear el contenido anterior; **Cancelar** cancela la incorporación de la carpeta. Puedes usar **Analizar ahora** más tarde.
-3. En **Archivos detectados**, combina búsqueda y filtros. Selecciona una fila para revisar nombre, ruta, fechas, estado y destino sugerido.
-4. Pulsa **Organizar** y confirma el destino. OrdenIA moverá el archivo solo entonces. En **Historial**, **Deshacer** intenta restaurarlo con un nombre libre si el original está ocupado.
+Conserva la base `ordenia.sqlite3`; no hace falta borrar ni exportar datos. Al iniciar V0.3 se añaden la fecha de modificación precisa y `file_analysis`, junto con su índice FTS5 cuando está disponible. Permanecen carpetas, archivos, estados, operaciones, preferencias, rutas e historial de V0.2. Los archivos previos comienzan con análisis **Pendiente** hasta que el usuario los analice; el contenido no se extrae masivamente al migrar.
 
-El botón **Copiar ruta** y las celdas de ruta copian la ruta completa al portapapeles. **Abrir ubicación** selecciona el archivo en Explorer cuando está disponible.
-
-## Exclusiones
-
-Escáner y watcher ignoran `desktop.ini`, `Thumbs.db`, `ehthumbs.db`, `.DS_Store`, nombres `~$*`, temporales como `.tmp`, `.temp`, `.part` y `.crdownload`, y directorios `$RECYCLE.BIN`, `System Volume Information`, `__pycache__`, `.git`, `.venv`, `node_modules` y los destinos administrados por OrdenIA. No se siguen enlaces simbólicos.
-
-## Arquitectura y seguridad
+## Arquitectura
 
 | Módulo | Responsabilidad |
 | --- | --- |
-| `core/` | Clasificación, exclusiones, destinos y movimientos sin sobrescritura |
-| `database/` | Esquema, migración y consultas SQLite |
-| `monitoring/` | Eventos del sistema de archivos |
-| `scanning/` | Recorrido de archivos existentes sin leer su contenido |
-| `services/` | Casos de uso, lotes y coordinación de hilos |
-| `platform/` | Abrir archivos y ubicaciones según el sistema operativo |
-| `ui/` | Ventana, páginas y widgets PySide6 |
+| `analysis/` | Registro y extractores locales, límites, palabras clave y vista previa |
+| `database/` | Migraciones SQLite, registros de contenido, FTS5 y consultas |
+| `services/` | Cola de dos workers, coordinación con vigilancia, escaneo y movimientos |
+| `monitoring/` y `scanning/` | Eventos y recorrido del sistema de archivos |
+| `core/` | Clasificación, exclusiones, destinos y movimientos seguros |
+| `ui/` | Interfaz PySide6; solicita acciones al servicio, sin extraer contenido |
 
-Los registros usan una **clave de ruta normalizada** como identidad. Tamaño y fecha de modificación se actualizan si cambia el mismo archivo; no se calculan hashes. Escáner y watcher pueden detectar simultáneamente la misma ruta, pero SQLite conserva una sola fila. Las escrituras del escáner se hacen en lotes de 200 y la tabla presenta 200 resultados por página, por lo que no necesita cargar 10.000 filas en un widget. El escaneo, el conteo y los movimientos trabajan fuera del hilo de la UI; señales de Qt comunican progreso y cambios.
+Las estrategias eligen la **raíz** del destino. Una ruta relativa validada determina el grupo bajo esa raíz: V0.3 usa categorías generales como `Documentos`; la misma validación admite subcarpetas para sugerencias futuras sin permitir salir de la raíz. No se clasifican proyectos automáticamente en V0.3.
 
-Ningún escaneo mueve archivos. Cada organización necesita confirmación explícita. Antes de registrar **Completado**, se verifica que el destino existe y el origen ya no. Los fallos quedan en el historial y los movimientos completados pueden deshacerse mientras el archivo siga en su destino. No se sobrescriben nombres existentes.
-
-## Tests
-
-```powershell
-python -m pytest
-```
-
-Los tests usan carpetas temporales para escaneo, exclusiones, destinos, búsqueda, migración, movimientos, Deshacer, watchdog y UI sin pantalla.
-
-## Limitaciones y roadmap
-
-- La clasificación sigue basada solo en la extensión; no analiza contenido ni calcula hashes.
-- Una carpeta inaccesible puede producir omisiones registradas en el log. Un cierre abrupto entre mover el archivo y escribir SQLite todavía puede requerir revisión manual.
-- No hay instalador ejecutable ni organización automática.
+## Roadmap
 
 | Versión | Objetivo |
 | --- | --- |
-| V0.1 | Monitorización y organización manual — completado |
-| V0.2 | Escaneo, destinos, búsqueda y UX — actual |
-| V0.3 | IA local |
-| V0.4 | Búsqueda semántica |
-| V0.5 | Detección de duplicados |
-| V0.6 | Detección de proyectos |
-| V0.7 | Automatizaciones |
+| V0.1 | Monitorización y organización segura — completado |
+| V0.2 | Escaneo, búsqueda, destinos y reconciliación — completado |
+| V0.3 | Análisis e indexación local de contenido — actual |
+| V0.4 | IA local |
+| V0.5 | Búsqueda semántica y proyectos |
 | V1.0 | Asistente inteligente completo |
 
 Licencia: Apache 2.0; consulta [LICENSE](LICENSE).

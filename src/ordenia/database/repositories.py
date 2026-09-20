@@ -3,6 +3,7 @@
 import sqlite3
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from ordenia.core.exclusions import ExclusionPolicy
 from ordenia.core.organizer import verify_transfer
 
 from .connection import connect
+from .content import ContentRepository
 from .models import DetectedFile, IndexedEntry, Operation, WatchedFolder
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ def _folder(row: sqlite3.Row) -> WatchedFolder:
 
 
 def _file(row: sqlite3.Row) -> DetectedFile:
-    return DetectedFile(row["id"], row["watched_folder_id"], Path(row["path"]), row["path_key"], Path(row["source_directory"]), row["name"], row["extension"], row["size"], row["category"], row["detected_at"], row["modified_at"], row["status"], row["index_state"])
+    return DetectedFile(row["id"], row["watched_folder_id"], Path(row["path"]), row["path_key"], Path(row["source_directory"]), row["name"], row["extension"], row["size"], row["category"], row["detected_at"], row["modified_at"], row["status"], row["index_state"], row["mtime_ns"])
 
 
 def _operation(row: sqlite3.Row) -> Operation:
@@ -42,24 +44,32 @@ def _operation(row: sqlite3.Row) -> Operation:
 
 _UPSERT_FILE = """
     INSERT INTO files(watched_folder_id, path, path_key, source_directory, name, extension,
-                      size, category, detected_at, modified_at, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pendiente')
+                      size, category, detected_at, modified_at, mtime_ns, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pendiente')
     ON CONFLICT(path_key) DO UPDATE SET
         path = excluded.path, source_directory = excluded.source_directory,
         name = excluded.name, extension = excluded.extension,
         size = excluded.size, category = excluded.category, modified_at = excluded.modified_at,
+        mtime_ns = excluded.mtime_ns,
         index_state = 'active'
 """
 
 
 def _file_values(folder_id: int, entry: IndexedEntry, detected_at: str) -> tuple[object, ...]:
     path = Path(os.path.abspath(entry.path.expanduser()))
-    return (folder_id, str(path), path_key(path), str(path.parent), path.name, path.suffix.lower(), entry.size, entry.category, detected_at, entry.modified_at)
+    mtime_ns = entry.mtime_ns
+    if not mtime_ns:
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            pass
+    return (folder_id, str(path), path_key(path), str(path.parent), path.name, path.suffix.lower(), entry.size, entry.category, detected_at, entry.modified_at, mtime_ns)
 
 
 class Repository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self.content = ContentRepository(db_path)
         self._initialize()
 
     def _initialize(self) -> None:
@@ -87,6 +97,7 @@ class Repository:
                     category TEXT NOT NULL,
                     detected_at TEXT NOT NULL,
                     modified_at TEXT NOT NULL,
+                    mtime_ns INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL DEFAULT 'Pendiente'
                         CHECK(status IN ('Pendiente', 'Organizado', 'Ignorado')),
                     index_state TEXT NOT NULL DEFAULT 'active'
@@ -126,6 +137,8 @@ class Repository:
             if "custom_destination" not in folder_columns:
                 db.execute("ALTER TABLE watched_folders ADD COLUMN custom_destination TEXT")
             file_columns = {row["name"] for row in db.execute("PRAGMA table_info(files)")}
+            if "mtime_ns" not in file_columns:
+                db.execute("ALTER TABLE files ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
             if "index_state" not in file_columns:
                 db.execute("ALTER TABLE files ADD COLUMN index_state TEXT NOT NULL DEFAULT 'active' CHECK(index_state IN ('active', 'missing', 'excluded'))")
             if "source_directory" not in file_columns:
@@ -169,6 +182,7 @@ class Repository:
 
             db.execute("CREATE INDEX IF NOT EXISTS idx_files_index_state_folder ON files(index_state, watched_folder_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_operations_file_id ON operations(file_id)")
+            self.content.initialize(db)
 
     def list_folders(self) -> list[WatchedFolder]:
         with connect(self.db_path) as db:
@@ -227,9 +241,9 @@ class Repository:
         with connect(self.db_path) as db:
             db.execute("UPDATE watched_folders SET enabled = 0, removed = 1 WHERE id = ?", (folder_id,))
 
-    def upsert_file(self, folder_id: int, path: Path, size: int, category: str, modified_at: str) -> DetectedFile:
+    def upsert_file(self, folder_id: int, path: Path, size: int, category: str, modified_at: str, mtime_ns: int = 0) -> DetectedFile:
         now = _now()
-        entry = IndexedEntry(path, size, category, modified_at)
+        entry = IndexedEntry(path, size, category, modified_at, mtime_ns)
         with connect(self.db_path) as db:
             db.execute(_UPSERT_FILE, _file_values(folder_id, entry, now))
             row = db.execute("SELECT * FROM files WHERE path_key = ?", (path_key(path),)).fetchone()
@@ -245,6 +259,14 @@ class Repository:
             existing = sum(db.execute("SELECT 1 FROM files WHERE path_key = ?", (key,)).fetchone() is not None for key in keys)
             db.executemany(_UPSERT_FILE, (_file_values(folder_id, entry, now) for entry in entries))
             return (len(entries) - existing, existing)
+
+    def ids_for_paths(self, paths: list[Path]) -> list[int]:
+        if not paths:
+            return []
+        keys = [path_key(path) for path in paths]
+        placeholders = ",".join("?" for _ in keys)
+        with connect(self.db_path) as db:
+            return [row[0] for row in db.execute(f"SELECT id FROM files WHERE path_key IN ({placeholders}) AND index_state = 'active'", keys)]
 
     def list_files(self) -> list[DetectedFile]:
         with connect(self.db_path) as db:
@@ -302,20 +324,28 @@ class Repository:
                 db.execute("UPDATE files SET index_state = 'missing' WHERE id = ?", (row["id"],))
                 return True
             db.execute("""UPDATE files SET path = ?, path_key = ?, source_directory = ?, name = ?, extension = ?,
-                size = ?, category = ?, modified_at = ?, index_state = ? WHERE id = ?""",
+                size = ?, category = ?, modified_at = ?, mtime_ns = ?, index_state = ? WHERE id = ?""",
                 (str(destination), path_key(destination), str(destination.parent), destination.name, destination.suffix.lower(),
                  entry.size if entry else row["size"], entry.category if entry else row["category"],
-                 entry.modified_at if entry else row["modified_at"], state, row["id"]))
+                 entry.modified_at if entry else row["modified_at"], entry.mtime_ns if entry else row["mtime_ns"], state, row["id"]))
             return True
 
-    @staticmethod
-    def _filter_clause(search: str, status: str, category: str) -> tuple[str, list[str]]:
+    def _filter_clause(self, search: str, status: str, category: str,
+                       search_name: bool = True, search_content: bool = False) -> tuple[str, list[str]]:
         clauses: list[str] = ["index_state = 'active'"]
         values: list[str] = []
         if search.strip():
             term = search.strip().casefold()
-            clauses.append("(INSTR(CASEFOLD(name), ?) > 0 OR INSTR(CASEFOLD(extension), ?) > 0 OR INSTR(CASEFOLD(category), ?) > 0 OR INSTR(CASEFOLD(path), ?) > 0 OR INSTR(CASEFOLD(source_directory), ?) > 0)")
-            values.extend([term] * 5)
+            search_parts: list[str] = []
+            if search_name:
+                search_parts.append("(INSTR(CASEFOLD(name), ?) > 0 OR INSTR(CASEFOLD(extension), ?) > 0 OR INSTR(CASEFOLD(category), ?) > 0 OR INSTR(CASEFOLD(path), ?) > 0 OR INSTR(CASEFOLD(source_directory), ?) > 0)")
+                values.extend([term] * 5)
+            if search_content:
+                content_clause = self.content.search_clause(search)
+                if content_clause:
+                    search_parts.append(content_clause[0])
+                    values.append(content_clause[1])
+            clauses.append("(" + " OR ".join(search_parts) + ")" if search_parts else "0")
         if status != "Todos":
             clauses.append("status = ?")
             values.append(status)
@@ -328,14 +358,32 @@ class Repository:
         self, search: str = "", status: str = "Todos", category: str = "Todas",
         sort_by: str = "detected_at", descending: bool = True,
         limit: int = 200, offset: int = 0,
+        search_name: bool = True, search_content: bool = False,
     ) -> tuple[list[DetectedFile], int]:
-        where, values = self._filter_clause(search, status, category)
+        where, values = self._filter_clause(search, status, category, search_name, search_content)
         column = _SORT_COLUMNS.get(sort_by, _SORT_COLUMNS["detected_at"])
         direction = "DESC" if descending else "ASC"
         with connect(self.db_path) as db:
             total = db.execute("SELECT COUNT(*) FROM files" + where, values).fetchone()[0]
             rows = db.execute(f"SELECT * FROM files{where} ORDER BY {column} {direction}, id DESC LIMIT ? OFFSET ?", (*values, max(1, limit), max(0, offset)))
-            return [_file(row) for row in rows], total
+            files = [_file(row) for row in rows]
+        if search_content and search.strip():
+            snippets = self.content.snippets([file.id for file in files], search)
+            files = [replace(file, match_snippet=snippets.get(file.id, "")) for file in files]
+        return files, total
+
+    def matching_file_ids(self, search: str = "", status: str = "Todos", category: str = "Todas",
+                          search_name: bool = True, search_content: bool = False) -> list[int]:
+        where, values = self._filter_clause(search, status, category, search_name, search_content)
+        with connect(self.db_path) as db:
+            return [row[0] for row in db.execute("SELECT id FROM files" + where + " ORDER BY id", values)]
+
+    def refresh_fingerprint(self, file_id: int, path: Path, size: int, mtime_ns: int, modified_at: str) -> bool:
+        with connect(self.db_path) as db:
+            updated = db.execute("""UPDATE files SET size = ?, mtime_ns = ?, modified_at = ?
+                WHERE id = ? AND path = ? AND index_state = 'active'""",
+                (size, mtime_ns, modified_at, file_id, str(path)))
+            return updated.rowcount == 1
 
     def count_by_category(self) -> dict[str, int]:
         with connect(self.db_path) as db:

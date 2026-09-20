@@ -27,6 +27,8 @@ class DetectedFile:
     modified_at: str
     status: str
     index_state: str = "active"
+    mtime_ns: int = 0
+    match_snippet: str = ""
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class IndexedEntry:
     size: int
     category: str
     modified_at: str
+    mtime_ns: int = 0
 
 
 @dataclass(frozen=True)

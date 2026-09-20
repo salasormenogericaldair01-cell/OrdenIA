@@ -16,6 +16,7 @@ from ordenia.database.repositories import Repository
 from ordenia.monitoring.watcher import FolderWatcher
 from ordenia.platform.actions import default_central_root
 from ordenia.scanning.scanner import FileScanner
+from ordenia.services.content_service import ContentService
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,9 @@ class FileService(QObject):
         self.scanner = FileScanner()
         self._closing = threading.Event()
         self.scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="OrdenIA scans")
-        self.watcher = FolderWatcher(repository, ExtensionClassifier(), self.changed.emit)
+        self.content = ContentService(repository)
+        self.content.changed.connect(self.changed.emit)
+        self.watcher = FolderWatcher(repository, ExtensionClassifier(), self.changed.emit, self._on_watcher_indexed)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="OrdenIA moves")
         for folder in repository.list_folders():
             try:
@@ -148,7 +151,19 @@ class FileService(QObject):
             roots = self._scan_roots(folder)
             valid = [entry for entry in entries if entry.path.is_file()
                      and self.scanner.policy.eligible_path(entry.path, folder.path, folder.include_subfolders, roots)]
-            return self.repository.upsert_files_batch(folder_id, valid)
+            result = self.repository.upsert_files_batch(folder_id, valid)
+            if self.repository.get_setting("auto_analyze_content", "0") == "1":
+                self.content.request(self.repository.ids_for_paths([entry.path for entry in valid]), automatic=True)
+            return result
+
+    def _on_watcher_indexed(self, file_id: int) -> None:
+        self.content.request([file_id], automatic=True)
+
+    def analyze_content(self, file_ids: list[int], *, force: bool = False) -> int:
+        return self.content.request(file_ids, force=force)
+
+    def cancel_content(self, job_id: int) -> None:
+        self.content.cancel(job_id)
 
     def _scan_folder(self, folder_id: int) -> None:
         try:
@@ -168,7 +183,7 @@ class FileService(QObject):
                 try:
                     stat = path.stat()
                     modified = datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds")
-                    batch.append(IndexedEntry(path, stat.st_size, self.classifier.classify(path), modified))
+                    batch.append(IndexedEntry(path, stat.st_size, self.classifier.classify(path), modified, stat.st_mtime_ns))
                 except OSError:
                     logger.warning("Archivo omitido durante el escaneo: %s", path, exc_info=True)
                     continue
@@ -297,3 +312,4 @@ class FileService(QObject):
         self.watcher.stop()
         self.scan_executor.shutdown(wait=True)
         self.executor.shutdown(wait=True)
+        self.content.close()

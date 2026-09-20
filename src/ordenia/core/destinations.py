@@ -10,6 +10,21 @@ CUSTOM = "custom"
 STRATEGIES = frozenset({INSIDE, CENTRAL, CUSTOM})
 
 
+def destination_directory(root: Path, relative_group: str | Path) -> Path:
+    """Resolve a safe relative group below a destination root.
+
+    V0.3 passes a single category; a later suggestion service may pass a
+    multi-part relative path without changing the destination strategy.
+    """
+    group = Path(relative_group)
+    if not group.parts or group.is_absolute() or group.drive or ".." in group.parts:
+        raise ValueError("La ruta sugerida debe estar dentro del destino de OrdenIA.")
+    directory = root / group
+    if not is_inside(directory, root):
+        raise ValueError("La ruta sugerida debe estar dentro del destino de OrdenIA.")
+    return directory
+
+
 def destination_root(
     watched_root: Path, strategy: str, central_root: Path,
     custom_root: Path | None = None,
