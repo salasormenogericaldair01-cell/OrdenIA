@@ -1,0 +1,1 @@
+"""Observación de carpetas."""

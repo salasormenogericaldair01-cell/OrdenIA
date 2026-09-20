@@ -1,4 +1,15 @@
 # Byte-compiled / optimized / DLL files
+.ordenia-*/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.tmp
+*.part
+*.crdownload
+~$*
 __pycache__/
 *.py[codz]
 *$py.class
