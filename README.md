@@ -1,4 +1,4 @@
-# OrdenIA V0.3
+# OrdenIA V0.3.1
 
 OrdenIA es una aplicación de escritorio para Windows que vigila carpetas, ayuda a organizar archivos con confirmación manual y ahora permite **buscar dentro de documentos**. La extracción de contenido es local y determinista; no utiliza modelos de IA.
 
@@ -18,6 +18,8 @@ OrdenIA es una aplicación de escritorio para Windows que vigila carpetas, ayuda
 - Busca por nombre/ruta y por contenido, con filtros de estado y categoría, paginación y fragmentos cortos de coincidencia.
 - Muestra estado del análisis, metadatos, palabras clave detectadas mediante frecuencias locales y una vista previa. Son heurísticas, no resúmenes de IA.
 - Permite analizar uno o varios archivos en segundo plano con progreso y cancelación. La cancelación detiene los trabajos aún no iniciados.
+- Reintenta con backoff los archivos que continúan escribiéndose, sin detener el watcher durante la espera.
+- Usa SQLite WAL para que la interfaz, el escáner, el watcher y los workers de contenido puedan leer y escribir con menor contención.
 
 ## Formatos de contenido
 
@@ -46,7 +48,7 @@ La barra de **Archivos detectados** permite combinar **Nombre y ruta** y **Conte
 
 SQLite FTS5 indexa texto y metadatos cuando está disponible; esta distribución de Python lo incluye. OrdenIA guarda el texto una sola vez en `file_analysis` y usa FTS5 con contenido externo. Si otro SQLite no trae FTS5, la búsqueda sigue funcionando mediante comparación textual local, con menor rendimiento. Los registros desactualizados, ausentes o excluidos no aparecen en los resultados normales.
 
-## Instalación y ejecución
+## Desarrollo
 
 Requiere Python 3.12 o posterior. Ejemplo en PowerShell:
 
@@ -58,6 +60,52 @@ ordenia
 ```
 
 También puedes ejecutar `python -m ordenia.main`. Para los tests: `python -m pytest`.
+
+PyInstaller se mantiene fuera de las dependencias de ejecución. Para preparar una máquina de empaquetado:
+
+```powershell
+python -m pip install -e ".[packaging]"
+```
+
+## Build Windows
+
+Desde PowerShell, en la raíz del repositorio:
+
+```powershell
+.\packaging\build_windows.ps1
+```
+
+El script elimina únicamente `build/` y `dist/` dentro del proyecto, genera metadata de Windows a partir de `ordenia.__version__`, construye una distribución **one-folder** y ejecuta el binario real en modo smoke test. El smoke test abre y cierra Qt, migra una base V0.2 aislada, abre SQLite, comprueba WAL y detecta FTS5.
+
+La salida principal es:
+
+```text
+dist\OrdenIA\OrdenIA.exe
+```
+
+No requiere PowerShell, un entorno virtual ni Python instalado en la máquina donde se ejecuta.
+
+### Instalador
+
+Si Inno Setup 6 está instalado, el mismo script genera:
+
+```text
+dist\installer\OrdenIA-Setup-0.3.1.exe
+```
+
+Si Inno Setup no está disponible, el build de `OrdenIA.exe` termina correctamente y muestra cómo completar el instalador más adelante. El instalador admite actualización sobre una versión anterior, crea una entrada del menú Inicio y ofrece un acceso directo opcional en el escritorio. La desinstalación no elimina los datos locales.
+
+El icono es opcional. Cuando exista `packaging/assets/ordenia.ico`, PyInstaller lo incorporará; su ausencia no bloquea el build.
+
+## Datos locales
+
+La aplicación instalada conserva base, índice, configuración y logs en:
+
+```text
+%LOCALAPPDATA%\OrdenIA
+```
+
+Nada se guarda dentro de `Program Files` ni de `dist/`. Reinstalar o actualizar los binarios no elimina `ordenia.sqlite3`.
 
 ## Uso del análisis
 
@@ -89,7 +137,8 @@ Las estrategias eligen la **raíz** del destino. Una ruta relativa validada dete
 | --- | --- |
 | V0.1 | Monitorización y organización segura — completado |
 | V0.2 | Escaneo, búsqueda, destinos y reconciliación — completado |
-| V0.3 | Análisis e indexación local de contenido — actual |
+| V0.3 | Análisis e indexación local de contenido — completado |
+| V0.3.1 | Robustez en Windows y empaquetado — actual |
 | V0.4 | IA local |
 | V0.5 | Búsqueda semántica y proyectos |
 | V1.0 | Asistente inteligente completo |

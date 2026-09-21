@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.repository = repository
         self.service = service
-        self.setWindowTitle(f"OrdenIA · V{__version__.rsplit('.', 1)[0]}")
+        self.setWindowTitle(f"OrdenIA · V{__version__}")
         self.setMinimumSize(820, 480)
         self.resize(1240, 760)
         self.setStyleSheet(STYLESHEET)
@@ -68,7 +68,7 @@ class MainWindow(QMainWindow):
         self.navigation = QListWidget()
         self.navigation.addItems(["Inicio", "Archivos detectados", "Carpetas vigiladas", "Historial", "Configuración"])
         side_layout.addWidget(self.navigation)
-        version = QLabel(f"V{__version__.rsplit('.', 1)[0]} · Local y seguro")
+        version = QLabel(f"V{__version__} · Local y seguro")
         version.setObjectName("muted")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         side_layout.addWidget(version)

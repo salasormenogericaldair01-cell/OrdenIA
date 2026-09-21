@@ -11,7 +11,7 @@ from ordenia.core.file_utils import path_key
 from ordenia.core.exclusions import ExclusionPolicy
 from ordenia.core.organizer import verify_transfer
 
-from .connection import connect
+from .connection import connect, initialize_database
 from .content import ContentRepository
 from .models import DetectedFile, IndexedEntry, Operation, WatchedFolder
 
@@ -69,6 +69,7 @@ def _file_values(folder_id: int, entry: IndexedEntry, detected_at: str) -> tuple
 class Repository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self.journal_mode = initialize_database(db_path)
         self.content = ContentRepository(db_path)
         self._initialize()
 

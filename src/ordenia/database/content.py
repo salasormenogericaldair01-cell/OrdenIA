@@ -1,6 +1,7 @@
 """SQLite content records and an external-content FTS5 index."""
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from ordenia.analysis.models import AnalysisOutcome, AnalysisRecord
 from ordenia.analysis.text_utils import snippet
 
 from .connection import connect
+
+logger = logging.getLogger(__name__)
 
 
 def _record(row: sqlite3.Row) -> AnalysisRecord:
@@ -53,6 +56,7 @@ class ContentRepository:
             if "fts5" not in str(exc).lower() and "no such module" not in str(exc).lower():
                 raise
             self.fts_enabled = False
+            logger.warning("SQLite no incluye FTS5; se usará la búsqueda textual local: %s", exc)
             return
         self.fts_enabled = True
         db.execute("""CREATE TRIGGER IF NOT EXISTS file_analysis_fts_insert AFTER INSERT ON file_analysis

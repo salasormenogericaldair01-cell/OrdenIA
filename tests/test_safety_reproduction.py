@@ -391,7 +391,7 @@ def test_legacy_operation_migration_is_independent_of_disk_availability(
     assert counts["active" if destination_online else "missing"] == 1
 
 
-def test_watcher_retries_after_unstable_event_on_later_modification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_watcher_retries_unstable_event_automatically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ordenia.core.classifier import ExtensionClassifier
     from ordenia.monitoring.watcher import FolderWatcher
 
@@ -399,7 +399,7 @@ def test_watcher_retries_after_unstable_event_on_later_modification(tmp_path: Pa
     root.mkdir()
     repository = Repository(tmp_path / "db.sqlite3")
     folder = repository.add_folder(root)
-    watcher = FolderWatcher(repository, ExtensionClassifier(), lambda: None)
+    watcher = FolderWatcher(repository, ExtensionClassifier(), lambda: None, retry_delays=(0.01,))
     path = root / "slow.txt"
     path.write_text("first")
     original = watcher._wait_stable
@@ -420,13 +420,10 @@ def test_watcher_retries_after_unstable_event_on_later_modification(tmp_path: Pa
         watcher._enqueue(folder, path)
         assert first_done.wait(5)
         deadline = time.monotonic() + 5
-        while path in watcher._pending and time.monotonic() < deadline:
-            time.sleep(0.01)
-        path.write_text("second")
-        watcher._enqueue(folder, path)
         while repository.dashboard_counts()["total"] == 0 and time.monotonic() < deadline:
             time.sleep(0.02)
         assert repository.dashboard_counts()["total"] == 1
         assert repository.search_files("slow")[1] == 1
+        assert calls == 2
     finally:
         watcher.stop()

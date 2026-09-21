@@ -42,6 +42,8 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!packaging/ordenia.spec
+dist/installer/*.exe
 
 # Installer logs
 pip-log.txt
