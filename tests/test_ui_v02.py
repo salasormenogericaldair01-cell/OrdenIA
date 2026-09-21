@@ -36,7 +36,7 @@ def test_ui_search_filters_and_details(tmp_path: Path, monkeypatch) -> None:
         assert page.table.rowCount() == 3
         page.table.horizontalHeader().sectionClicked.emit(0)
         assert page.table.item(0, 0).text() == "Otro.pdf"
-        assert window.windowTitle() == "OrdenIA · V0.3.1"
+        assert window.windowTitle() == "OrdenIA · V0.4.0"
         app.processEvents()
     finally:
         window.close()

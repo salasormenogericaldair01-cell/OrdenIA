@@ -12,6 +12,7 @@ from ordenia.core.exclusions import ExclusionPolicy
 from ordenia.core.organizer import verify_transfer
 
 from .connection import connect, initialize_database
+from .ai import AIRepository
 from .content import ContentRepository
 from .models import DetectedFile, IndexedEntry, Operation, WatchedFolder
 
@@ -71,6 +72,7 @@ class Repository:
         self.db_path = db_path
         self.journal_mode = initialize_database(db_path)
         self.content = ContentRepository(db_path)
+        self.ai = AIRepository(db_path)
         self._initialize()
 
     def _initialize(self) -> None:
@@ -169,6 +171,7 @@ class Repository:
             db.execute("CREATE INDEX IF NOT EXISTS idx_files_index_state_folder ON files(index_state, watched_folder_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_operations_file_id ON operations(file_id)")
             self.content.initialize(db)
+            self.ai.initialize(db)
 
     def list_folders(self) -> list[WatchedFolder]:
         with connect(self.db_path) as db:

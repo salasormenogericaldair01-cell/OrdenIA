@@ -13,7 +13,7 @@ STRATEGIES = frozenset({INSIDE, CENTRAL, CUSTOM})
 def destination_directory(root: Path, relative_group: str | Path) -> Path:
     """Resolve a safe relative group below a destination root.
 
-    V0.3 passes a single category; a later suggestion service may pass a
+    Extension rules may pass one category and V0.4 suggestions may pass a
     multi-part relative path without changing the destination strategy.
     """
     group = Path(relative_group)

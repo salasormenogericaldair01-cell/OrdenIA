@@ -45,7 +45,7 @@ def test_window_can_open_and_close_offscreen(tmp_path: Path, monkeypatch) -> Non
     try:
         window.show()
         app.processEvents()
-        assert window.windowTitle() == "OrdenIA · V0.3.1"
+        assert window.windowTitle() == "OrdenIA · V0.4.0"
         assert window.stack.count() == 5
     finally:
         window.close()

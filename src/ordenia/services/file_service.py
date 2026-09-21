@@ -17,7 +17,9 @@ from ordenia.monitoring.watcher import FolderWatcher
 from ordenia.platform.actions import default_central_root
 from ordenia.scanning.scanner import FileScanner
 from ordenia.services.content_service import ContentService
+from ordenia.services.ai_service import AIService
 from ordenia.services.file_locks import FileOperationLocks
+from ordenia.ai.parser import validate_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,8 @@ class FileService(QObject):
         self.file_locks = FileOperationLocks()
         self.content = ContentService(repository, operation_locks=self.file_locks)
         self.content.changed.connect(self.changed.emit)
+        self.ai = AIService(repository, self.content, operation_locks=self.file_locks)
+        self.ai.changed.connect(lambda _file_id: self.changed.emit())
         self.watcher = FolderWatcher(repository, ExtensionClassifier(), self.changed.emit, self._on_watcher_indexed)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="OrdenIA moves")
         for folder in repository.list_folders():
@@ -107,9 +111,10 @@ class FileService(QObject):
         self.watcher.refresh()
         self.changed.emit()
 
-    def proposal(self, file: DetectedFile) -> Path:
+    def proposal(self, file: DetectedFile, relative_group: str | None = None) -> Path:
         folder = self.repository.get_folder(file.watched_folder_id)
-        return self.organizer.proposed_destination(file.path, folder.path, file.category, self.destination_for(folder))
+        group = validate_relative_path(relative_group) if relative_group is not None else file.category
+        return self.organizer.proposed_destination(file.path, folder.path, group, self.destination_for(folder))
 
     def _scan_roots(self, folder: WatchedFolder) -> tuple[Path, ...]:
         return self.repository.list_managed_roots() + tuple(item.path / "OrdenIA" for item in self.repository.list_folders()) + (folder.path / "OrdenIA",)
@@ -167,6 +172,12 @@ class FileService(QObject):
     def cancel_content(self, job_id: int) -> None:
         self.content.cancel(job_id)
 
+    def analyze_with_ai(self, file_ids: list[int], *, force: bool = False) -> int:
+        return self.ai.request(file_ids, force=force)
+
+    def cancel_ai(self, job_id: int) -> None:
+        self.ai.cancel(job_id)
+
     def _scan_folder(self, folder_id: int) -> None:
         try:
             folder = self.repository.get_folder(folder_id)
@@ -218,14 +229,19 @@ class FileService(QObject):
             self.scan_failed.emit(folder_id, str(exc))
             self.error.emit(f"No se pudo analizar la carpeta: {exc}")
 
-    def organize(self, file_id: int) -> None:
-        self.executor.submit(self._organize, file_id)
+    def organize(self, file_id: int, relative_group: str | None = None,
+                 ai_suggested_path: str | None = None) -> None:
+        group = validate_relative_path(relative_group) if relative_group is not None else None
+        suggested = validate_relative_path(ai_suggested_path) if ai_suggested_path is not None else None
+        self.executor.submit(self._organize, file_id, group, suggested)
 
-    def _organize(self, file_id: int) -> None:
+    def _organize(self, file_id: int, relative_group: str | None = None,
+                  ai_suggested_path: str | None = None) -> None:
         with self.file_locks.hold(file_id):
-            self._organize_locked(file_id)
+            self._organize_locked(file_id, relative_group, ai_suggested_path)
 
-    def _organize_locked(self, file_id: int) -> None:
+    def _organize_locked(self, file_id: int, relative_group: str | None = None,
+                         ai_suggested_path: str | None = None) -> None:
         file: DetectedFile | None = None
         planned: Path | None = None
         destination: Path | None = None
@@ -239,10 +255,18 @@ class FileService(QObject):
                     raise ValueError("Solo se pueden organizar archivos pendientes.")
                 folder = self.repository.get_folder(file.watched_folder_id)
                 root = self.destination_for(folder)
-                planned = self.organizer.proposed_destination(file.path, folder.path, file.category, root)
-                destination = self.organizer.move(file.path, folder.path, file.category, root)
+                group = relative_group or file.category
+                planned = self.organizer.proposed_destination(file.path, folder.path, group, root)
+                destination = self.organizer.move(file.path, folder.path, group, root)
                 verify_transfer(file.path, destination)
                 self.repository.record_move(file.id, file.path, destination)
+                if ai_suggested_path is not None and group != ai_suggested_path:
+                    record = self.repository.ai.get(file.id)
+                    if record.suggestion is not None:
+                        try:
+                            self.repository.ai.save_feedback(file.id, record.suggestion, group)
+                        except Exception:
+                            logger.exception("El movimiento terminó, pero no se pudo guardar el feedback de IA")
             except Exception as exc:
                 logger.exception("Error al organizar el archivo %s", file_id)
                 failure = f"No se pudo organizar el archivo: {exc}"
@@ -328,4 +352,5 @@ class FileService(QObject):
         self.watcher.stop()
         self.scan_executor.shutdown(wait=True)
         self.executor.shutdown(wait=True)
+        self.ai.close()
         self.content.close()

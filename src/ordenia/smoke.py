@@ -65,9 +65,14 @@ def run_smoke(app: QApplication, window: MainWindow, repository: Repository,
             with sqlite3.connect(repository.db_path) as db:
                 result["migration_schema"] = bool(db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_analysis'").fetchone())
+                result["ai_migration_schema"] = all(db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone() for table in ("ai_suggestions", "ai_feedback", "ai_settings"))
+            result["ai_optional_without_ollama"] = repository.ai.get_setting("provider") == "ollama"
             result["window_visible"] = window.isVisible()
             result["ok"] = bool(result["window_visible"] and result["journal_mode"] == "wal"
                                 and result["migration_preserved"] and result["migration_schema"]
+                                and result["ai_migration_schema"] and result["ai_optional_without_ollama"]
                                 and all(result["dependencies"].values()))
             if not result["ok"]:
                 exit_code = 2

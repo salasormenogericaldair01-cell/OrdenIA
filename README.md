@@ -1,56 +1,85 @@
-# OrdenIA V0.3.1
+# OrdenIA V0.4
 
-OrdenIA es una aplicación de escritorio para Windows que vigila carpetas, ayuda a organizar archivos con confirmación manual y ahora permite **buscar dentro de documentos**. La extracción de contenido es local y determinista; no utiliza modelos de IA.
+OrdenIA es una aplicación de escritorio para Windows que vigila, indexa y ayuda a organizar archivos con confirmación humana. V0.4 añade **análisis inteligente local opcional mediante Ollama**: interpreta el contenido ya extraído, propone tipo, tema, etiquetas y una ruta jerárquica, y explica brevemente la propuesta.
+
+La IA solo propone. Nunca mueve, elimina ni sobrescribe archivos. Todo movimiento continúa pasando por el diálogo de confirmación, `FileService` y el organizador seguro y reversible.
 
 ## Privacidad
 
-- El contenido se procesa en el equipo del usuario.
-- No se utilizan APIs ni se envían documentos a Internet.
-- El texto extraído y el índice de búsqueda se guardan en la base SQLite local, en `%LOCALAPPDATA%\OrdenIA\`.
-- Quien tenga acceso a esa base podrá leer el texto indexado. Protege la cuenta de Windows y sus copias de seguridad como protegerías los documentos originales.
+- La extracción, búsqueda y clasificación inteligente se ejecutan en el equipo del usuario.
+- OrdenIA V0.4 no usa APIs cloud, claves API, telemetría ni servicios externos.
+- El cliente Ollama acepta únicamente un endpoint HTTP de loopback (`127.0.0.1`, `localhost` o `::1`).
+- No se envían documentos a Internet. Ollama no está incluido en OrdenIA y debe instalarse por separado.
+- Texto, sugerencias, feedback e índice FTS se guardan localmente en `%LOCALAPPDATA%\OrdenIA\ordenia.sqlite3`.
+- Quien tenga acceso a la base puede leer el texto indexado. Protege la cuenta de Windows y sus copias de seguridad como los documentos originales.
 
 ## Funciones
 
-- Vigila carpetas con `watchdog` y puede analizar archivos existentes, con o sin subcarpetas.
-- Excluye archivos temporales, archivos del sistema y destinos administrados. **Analizar ahora** reconcilia archivos ausentes o excluidos sin borrar historial.
-- Clasifica por extensión y propone destinos dentro de la carpeta vigilada, en una biblioteca central o en una carpeta personalizada. Al añadir o editar una carpeta se muestran las tres rutas y un ejemplo del destino propuesto.
-- Solo mueve archivos tras confirmación explícita; verifica el movimiento, evita sobrescrituras y permite **Deshacer**.
-- Busca por nombre/ruta y por contenido, con filtros de estado y categoría, paginación y fragmentos cortos de coincidencia.
-- Muestra estado del análisis, metadatos, palabras clave detectadas mediante frecuencias locales y una vista previa. Son heurísticas, no resúmenes de IA.
-- Permite analizar uno o varios archivos en segundo plano con progreso y cancelación. La cancelación detiene los trabajos aún no iniciados.
-- Reintenta con backoff los archivos que continúan escribiéndose, sin detener el watcher durante la espera.
-- Usa SQLite WAL para que la interfaz, el escáner, el watcher y los workers de contenido puedan leer y escribir con menor contención.
+- Monitorización con `watchdog`, escaneo de archivos existentes y reconciliación del índice.
+- Exclusión centralizada de temporales, archivos del sistema y destinos administrados.
+- Extracción local de PDF, DOCX, XLSX, PPTX, texto y código, sin ejecutar contenido.
+- Búsqueda por nombre, ruta y contenido con SQLite FTS5 y fallback local.
+- Clasificación por extensión y destinos dentro de la carpeta vigilada, biblioteca central o carpeta personalizada.
+- Movimiento manual verificado, sin sobrescrituras y con **Deshacer**.
+- Sugerencias IA locales con tipo de documento, tema, etiquetas, ruta relativa, confianza orientativa y razón.
+- Feedback de rutas corregidas usado como contexto en sugerencias posteriores; no hay entrenamiento ni fine-tuning.
+- Reintentos con backoff del watcher y SQLite WAL para mejorar la concurrencia.
+
+## IA local con Ollama
+
+### Qué hace
+
+OrdenIA construye un contexto compacto a partir del nombre, extensión, categoría, metadatos, palabras clave, fragmentos del contenido, carpetas existentes y unos pocos feedback anteriores relevantes. El contexto está limitado a aproximadamente 6.000 caracteres; no se envían documentos completos innecesariamente.
+
+El modelo devuelve JSON estructurado. OrdenIA valida tipos, longitudes, confianza y ruta antes de persistir la sugerencia. Se rechazan rutas absolutas, unidades, UNC, variables de entorno, `..` y caracteres peligrosos.
+
+El contenido se delimita como **datos no confiables**. Frases como “ignore previous instructions”, “delete the file” o “return C:\Windows” no se ejecutan y no pueden saltarse la validación ni la confirmación humana.
+
+### Instalación manual
+
+1. Instala Ollama desde su distribución oficial y ejecútalo localmente.
+2. Instala un modelo pequeño apropiado para 16 GB de RAM. Recomendación inicial:
+
+```powershell
+ollama pull qwen3:4b-instruct
+```
+
+OrdenIA nunca ejecuta ese comando ni descarga modelos automáticamente. Para instalaciones nuevas recomienda `qwen3:4b-instruct`, una variante orientada a instrucciones y salida breve. Una configuración existente, por ejemplo `qwen3:4b`, se conserva y puede seguir utilizándose.
+
+3. Abre **Configuración → IA local**, escribe el nombre del modelo y pulsa **Comprobar conexión**.
+4. En **Archivos detectados**, selecciona un archivo y pulsa **Analizar con IA**. Si hace falta, OrdenIA prepara primero su índice de contenido.
+5. Revisa la sugerencia. **Usar sugerencia** permite editar la ruta relativa y abre la confirmación normal de organización.
+
+Si Ollama está cerrado o el modelo no está instalado, OrdenIA muestra una explicación y todas las funciones de V0.3 siguen disponibles.
+
+### Estados de IA
+
+Los estados son **Sin analizar**, **Analizando**, **Listo**, **Error**, **Desactualizado** e **IA local no disponible**. Son independientes del estado del archivo y del análisis de contenido. Un cambio de tamaño o `mtime` marca la sugerencia como desactualizada; mover o deshacer un archivo sin cambiarlo conserva la sugerencia.
+
+La confianza **Baja / Media / Alta** es un score orientativo producido por el modelo, no una probabilidad científica.
 
 ## Formatos de contenido
 
 | Tipo | Extensiones | Datos extraídos |
 | --- | --- | --- |
-| PDF | `.pdf` | Texto página por página, páginas, título, autor y asunto; sin OCR |
+| PDF | `.pdf` | Texto por página, páginas, título, autor y asunto; sin OCR |
 | Word | `.docx` | Párrafos, encabezados, tablas y propiedades básicas |
-| Excel | `.xlsx` | Nombres de hojas y valores de celdas; `read_only`, sin evaluar fórmulas |
-| PowerPoint | `.pptx` | Texto de diapositivas, formas, tablas y notas disponibles |
+| Excel | `.xlsx` | Nombres de hojas y valores; `read_only`, sin evaluar fórmulas |
+| PowerPoint | `.pptx` | Texto, formas, tablas y notas disponibles |
 | Texto | `.txt`, `.md`, `.log`, `.csv` | Contenido textual |
-| Código | `.py`, `.js`, `.ts`, `.tsx`, `.jsx`, `.java`, `.c`, `.cpp`, `.h`, `.hpp`, `.ino`, `.html`, `.css`, `.json`, `.yaml`, `.yml`, `.toml`, `.sql`, `.sh`, `.ps1`, `.bat`, `.xml` | Contenido como texto; nunca se ejecuta |
+| Código | `.py`, `.js`, `.ts`, `.tsx`, `.jsx`, `.java`, `.c`, `.cpp`, `.h`, `.hpp`, `.ino`, `.html`, `.css`, `.json`, `.yaml`, `.yml`, `.toml`, `.sql`, `.sh`, `.ps1`, `.bat`, `.xml` | Texto; nunca se ejecuta |
 
-Los formatos heredados `.doc`, `.xls` y `.ppt` pueden registrarse y organizarse, pero indican **«No compatible con análisis de contenido en V0.3»**. Un PDF sin texto extraíble muestra ese estado sin tratarlo como error fatal. Los PDF dañados o cifrados muestran una razón de fallo. No hay OCR ni conversión con otras aplicaciones.
+Los formatos heredados `.doc`, `.xls` y `.ppt` pueden organizarse, pero no se extraen en V0.4. No hay OCR ni conversión mediante aplicaciones externas.
 
-## Límites y estados
+## Límites
 
-El análisis manual admite archivos de hasta **50 MB**; para `.docx`, `.xlsx` y `.pptx` el límite es **20 MB**, con un máximo de **100 MB descomprimidos** y **10.000 entradas** por archivo Office. Se guardan como máximo **250.000 caracteres** por archivo; los extractores limitan además PDF a **250 páginas**, PPTX a **300 diapositivas** y XLSX a **50.000 celdas y 200 columnas por hoja**. Cuando se llega a un límite, el resultado indica truncamiento u omisión. Los archivos grandes no se cargan completos deliberadamente.
+El análisis de contenido admite hasta 50 MB; Office moderno hasta 20 MB, 100 MB descomprimidos y 10.000 entradas. Se guardan hasta 250.000 caracteres por archivo. PDF se limita a 250 páginas, PPTX a 300 diapositivas y XLSX a 50.000 celdas y 200 columnas por hoja.
 
-Los estados del contenido son **Pendiente**, **Analizando**, **Indexado**, **Sin texto**, **No compatible**, **Omitido**, **Error** y **Desactualizado**. Son independientes de Pendiente/Organizado/Ignorado y de activo/ausente/excluido. Un cambio de tamaño o fecha de modificación de alta precisión invalida el contenido anterior y lo retira de los resultados hasta reanalizarlo. Organizar y Deshacer conservan el índice cuando el archivo no cambió.
-
-En **Configuración**, el análisis automático de nuevos archivos compatibles está **desactivado por defecto**. Puede activarse y fijarse un máximo entre 1 y 50 MB; siguen aplicando los límites generales. Hay dos workers de extracción para evitar miles de hilos. El análisis de archivos ya existentes solo se solicita mediante el flujo de escaneo o la acción manual; el escaneo nunca mueve archivos.
-
-## Búsqueda local
-
-La barra de **Archivos detectados** permite combinar **Nombre y ruta** y **Contenido**. Para buscar solo dentro de documentos, desmarca Nombre y ruta. Por ejemplo, `ESP32`, `sensor ultrasónico`, `inventario` o `"gestión de residuos"` pueden encontrar archivos cuyo nombre no contiene esos términos, siempre que su contenido ya esté indexado. Los filtros de categoría y estado se mantienen.
-
-SQLite FTS5 indexa texto y metadatos cuando está disponible; esta distribución de Python lo incluye. OrdenIA guarda el texto una sola vez en `file_analysis` y usa FTS5 con contenido externo. Si otro SQLite no trae FTS5, la búsqueda sigue funcionando mediante comparación textual local, con menor rendimiento. Los registros desactualizados, ausentes o excluidos no aparecen en los resultados normales.
+La cola de IA usa **un solo worker** para evitar cargar varios modelos o saturar equipos sin GPU dedicada. La conexión local usa un timeout corto y la inferencia un máximo de cinco minutos. Cancelar detiene trabajos pendientes; una inferencia activa termina de forma segura y su resultado se descarta si el trabajo fue cancelado.
 
 ## Desarrollo
 
-Requiere Python 3.12 o posterior. Ejemplo en PowerShell:
+Requiere Python 3.12 o posterior:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -59,77 +88,93 @@ python -m pip install -e ".[dev]"
 ordenia
 ```
 
-También puedes ejecutar `python -m ordenia.main`. Para los tests: `python -m pytest`.
-
-PyInstaller se mantiene fuera de las dependencias de ejecución. Para preparar una máquina de empaquetado:
+Tests normales, sin Ollama:
 
 ```powershell
-python -m pip install -e ".[packaging]"
+python -m pytest
 ```
+
+Prueba opcional del servicio local:
+
+```powershell
+$env:ORDENIA_RUN_OLLAMA_TESTS = "1"
+python -m pytest -m ollama
+```
+
+## Benchmark local opcional
+
+Con Ollama y el modelo instalados:
+
+```powershell
+python scripts\benchmark_local_ai.py --model qwen3:4b-instruct
+```
+
+Para comparar dos modelos instalados en una sola ejecución:
+
+```powershell
+python scripts\benchmark_local_ai.py --model qwen3:4b-instruct --model qwen3:4b
+```
+
+Usa seis documentos sintéticos y registra tiempo, caracteres enviados, carga del modelo, validez JSON y resultado por caso. Un timeout no detiene los casos restantes. No realiza assertions de calidad ni usa documentos personales.
 
 ## Build Windows
 
-Desde PowerShell, en la raíz del repositorio:
+PyInstaller es una dependencia separada de empaquetado:
 
 ```powershell
+python -m pip install -e ".[packaging]"
 .\packaging\build_windows.ps1
 ```
 
-El script elimina únicamente `build/` y `dist/` dentro del proyecto, genera metadata de Windows a partir de `ordenia.__version__`, construye una distribución **one-folder** y ejecuta el binario real en modo smoke test. El smoke test abre y cierra Qt, migra una base V0.2 aislada, abre SQLite, comprueba WAL y detecta FTS5.
-
-La salida principal es:
+Salida principal:
 
 ```text
 dist\OrdenIA\OrdenIA.exe
 ```
 
-No requiere PowerShell, un entorno virtual ni Python instalado en la máquina donde se ejecuta.
+El build one-folder ejecuta un smoke test real: abre y cierra Qt, migra SQLite, comprueba WAL, FTS5 y las tablas V0.4. El EXE abre sin Ollama; Ollama y los modelos no se empaquetan.
 
-### Instalador
-
-Si Inno Setup 6 está instalado, el mismo script genera:
+Si Inno Setup 6 está instalado, también genera:
 
 ```text
-dist\installer\OrdenIA-Setup-0.3.1.exe
+dist\installer\OrdenIA-Setup-0.4.0.exe
 ```
 
-Si Inno Setup no está disponible, el build de `OrdenIA.exe` termina correctamente y muestra cómo completar el instalador más adelante. El instalador admite actualización sobre una versión anterior, crea una entrada del menú Inicio y ofrece un acceso directo opcional en el escritorio. La desinstalación no elimina los datos locales.
+Los datos permanecen en `%LOCALAPPDATA%\OrdenIA`; instalar, actualizar o desinstalar los binarios no elimina esa carpeta.
 
-El icono es opcional. Cuando exista `packaging/assets/ordenia.ico`, PyInstaller lo incorporará; su ausencia no bloquea el build.
+## Migración desde V0.3.1
 
-## Datos locales
-
-La aplicación instalada conserva base, índice, configuración y logs en:
-
-```text
-%LOCALAPPDATA%\OrdenIA
-```
-
-Nada se guarda dentro de `Program Files` ni de `dist/`. Reinstalar o actualizar los binarios no elimina `ordenia.sqlite3`.
-
-## Uso del análisis
-
-1. Añade una carpeta vigilada y acepta analizar los archivos existentes, o pulsa **Analizar ahora** más tarde.
-2. En **Archivos detectados**, selecciona una o varias filas y pulsa **Analizar contenido**. Puedes cancelar los análisis aún pendientes de la cola.
-3. Revisa estado, extractor, metadatos, palabras clave y vista previa en los detalles. **Reanalizar** actualiza un archivo tras cambios o fallos.
-4. Busca con la opción **Contenido** activada. OrdenIA consulta el índice SQLite, no vuelve a abrir cada documento durante la búsqueda.
-
-## Migración desde V0.2
-
-Conserva la base `ordenia.sqlite3`; no hace falta borrar ni exportar datos. Al iniciar V0.3 se añaden la fecha de modificación precisa y `file_analysis`, junto con su índice FTS5 cuando está disponible. Permanecen carpetas, archivos, estados, operaciones, preferencias, rutas e historial de V0.2. Los archivos previos comienzan con análisis **Pendiente** hasta que el usuario los analice; el contenido no se extrae masivamente al migrar.
+No borres `ordenia.sqlite3`. Al iniciar V0.4 se crean de forma determinista `ai_suggestions`, `ai_feedback` y `ai_settings`, junto con el trigger de invalidación. Se conservan carpetas, archivos, estados, contenido, FTS5, operaciones, historial y configuración previa. No se analiza ningún documento con IA automáticamente durante la migración.
 
 ## Arquitectura
 
 | Módulo | Responsabilidad |
 | --- | --- |
-| `analysis/` | Registro y extractores locales, límites, palabras clave y vista previa |
-| `database/` | Migraciones SQLite, registros de contenido, FTS5 y consultas |
-| `services/` | Cola de dos workers, coordinación con vigilancia, escaneo y movimientos |
-| `monitoring/` y `scanning/` | Eventos y recorrido del sistema de archivos |
+| `analysis/` | Extracción objetiva, límites, metadatos, palabras clave y vista previa |
+| `ai/` | Contexto acotado, prompts, parser estricto, modelos y proveedores locales |
+| `services/content_service.py` | Cola de extracción de contenido |
+| `services/ai_service.py` | Cola IA de un worker, cancelación, estados y validación de fingerprint |
+| `database/` | Migraciones, FTS5, sugerencias, feedback y preferencias |
 | `core/` | Clasificación, exclusiones, destinos y movimientos seguros |
-| `ui/` | Interfaz PySide6; solicita acciones al servicio, sin extraer contenido |
+| `monitoring/` y `scanning/` | Watcher y recorrido del sistema de archivos |
+| `ui/` | Presentación y confirmación humana; no extrae contenido ni llama al organizador directamente |
 
-Las estrategias eligen la **raíz** del destino. Una ruta relativa validada determina el grupo bajo esa raíz: V0.3 usa categorías generales como `Documentos`; la misma validación admite subcarpetas para sugerencias futuras sin permitir salir de la raíz. No se clasifican proyectos automáticamente en V0.3.
+Flujo de seguridad:
+
+```text
+Archivo → ContentService → AIService → AISuggestion → UI
+        → confirmación humana → FileService → Organizer
+```
+
+`AIService` no importa `Organizer` ni tiene acceso a operaciones de archivos.
+
+## Limitaciones V0.4
+
+- La calidad depende del modelo local elegido y del contenido extraíble.
+- No hay OCR, embeddings, base vectorial, RAG complejo ni búsqueda semántica.
+- No hay organización automática ni por lotes sin confirmación.
+- No hay APIs cloud, fine-tuning, telemetría, voz ni agentes autónomos.
+- La cancelación no interrumpe brutalmente una inferencia ya iniciada por Ollama.
 
 ## Roadmap
 
@@ -138,8 +183,8 @@ Las estrategias eligen la **raíz** del destino. Una ruta relativa validada dete
 | V0.1 | Monitorización y organización segura — completado |
 | V0.2 | Escaneo, búsqueda, destinos y reconciliación — completado |
 | V0.3 | Análisis e indexación local de contenido — completado |
-| V0.3.1 | Robustez en Windows y empaquetado — actual |
-| V0.4 | IA local |
+| V0.3.1 | Robustez Windows y empaquetado — completado |
+| V0.4 | IA local con sugerencias y feedback — actual |
 | V0.5 | Búsqueda semántica y proyectos |
 | V1.0 | Asistente inteligente completo |
 

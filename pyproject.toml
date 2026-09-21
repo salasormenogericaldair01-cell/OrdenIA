@@ -26,3 +26,4 @@ version = {attr = "ordenia.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["ollama: prueba opcional que requiere un servicio Ollama local"]
