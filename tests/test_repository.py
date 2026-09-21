@@ -77,7 +77,7 @@ def test_reopen_preserves_file_states_paths_and_history(tmp_path: Path) -> None:
     assert reopened_again.list_operations()[0].status == "Completado"
 
 
-def test_migration_marks_unverified_legacy_move_failed_without_deleting_data(tmp_path: Path) -> None:
+def test_migration_preserves_legacy_operation_then_reconciles_missing_file(tmp_path: Path) -> None:
     database = tmp_path / "legacy.sqlite3"
     original = tmp_path / "report.pdf"
     original.write_text("user data")
@@ -94,10 +94,13 @@ def test_migration_marks_unverified_legacy_move_failed_without_deleting_data(tmp
 
     repository = Repository(database)
     assert original.read_text() == "user data"
-    assert repository.get_operation(1).status == "Fallido"
-    assert repository.get_file(1).status == "Pendiente"
-    assert repository.get_file(1).path == original
-    assert Repository(database).get_operation(1).status == "Fallido"
+    assert repository.get_operation(1).status == "Completado"
+    assert repository.get_file(1).status == "Organizado"
+    assert repository.get_file(1).path == destination
+    counts = repository.reconcile_folder(repository.get_folder(1), ())
+    assert counts["missing"] == 1
+    assert repository.get_file(1).index_state == "missing"
+    assert Repository(database).get_operation(1).status == "Completado"
 
 
 def test_v01_database_migrates_without_losing_files_or_operations(tmp_path: Path) -> None:

@@ -59,9 +59,10 @@ class FolderWatcher:
         self._worker = threading.Thread(target=self._run, name="OrdenIA file analyzer", daemon=True)
 
     def start(self) -> None:
+        # Register directories before observers begin consuming filesystem events.
+        self.refresh()
         self.observer.start()
         self._worker.start()
-        self.refresh()
 
     def refresh(self) -> None:
         all_folders = self.repository.list_folders()

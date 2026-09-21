@@ -88,10 +88,18 @@ class ContentRepository:
             db.execute("""INSERT INTO file_analysis(file_id, status) VALUES (?, 'analyzing')
                 ON CONFLICT(file_id) DO UPDATE SET status = 'analyzing', error = NULL""", (file_id,))
 
-    def save(self, file_id: int, outcome: AnalysisOutcome, size: int, mtime_ns: int, *, stale: bool = False) -> None:
+    def save(self, file_id: int, outcome: AnalysisOutcome, size: int, mtime_ns: int, *,
+             stale: bool = False, expected_path: Path | None = None) -> None:
         now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-        status = "stale" if stale else outcome.status
         with connect(self.db_path) as db:
+            if expected_path is not None:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT path, size, mtime_ns, index_state FROM files WHERE id = ?", (file_id,)).fetchone()
+                stale = stale or row is None or (row["path"], row["size"], row["mtime_ns"], row["index_state"]) != (
+                    str(expected_path), size, mtime_ns, "active")
+            status = "stale" if stale else outcome.status
+            if stale:
+                outcome = AnalysisOutcome("stale")
             db.execute("""INSERT INTO file_analysis(
                 file_id,status,analyzed_at,extractor,title,author,subject,page_count,slide_count,
                 character_count,content_text,keywords_json,error,fingerprint_size,fingerprint_mtime_ns,truncated)
@@ -120,15 +128,19 @@ class ContentRepository:
     @staticmethod
     def fts_query(search: str) -> str:
         words = re.findall(r"\w+", search, re.UNICODE)
-        return '"' + " ".join(words) + '"' if words else ""
+        return " AND ".join('"' + word + '"' for word in words)
 
-    def search_clause(self, search: str) -> tuple[str, str] | None:
+    def search_clause(self, search: str) -> tuple[str, list[str]] | None:
         if self.fts_enabled:
             query = self.fts_query(search)
             if query:
-                return ("files.id IN (SELECT rowid FROM file_analysis_fts WHERE file_analysis_fts MATCH ?)", query)
-        return ("files.id IN (SELECT file_id FROM file_analysis WHERE status = 'indexed' "
-                "AND INSTR(CASEFOLD(content_text), ?) > 0)", search.casefold())
+                return ("files.id IN (SELECT rowid FROM file_analysis_fts WHERE file_analysis_fts MATCH ?)", [query])
+        words = re.findall(r"\w+", search, re.UNICODE)
+        if not words:
+            return None
+        conditions = " AND ".join("INSTR(CASEFOLD(content_text), ?) > 0" for _ in words)
+        return ("files.id IN (SELECT file_id FROM file_analysis WHERE status = 'indexed' AND "
+                + conditions + ")", [word.casefold() for word in words])
 
     def snippets(self, file_ids: list[int], query: str) -> dict[int, str]:
         if not file_ids or not query.strip():

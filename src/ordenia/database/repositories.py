@@ -159,26 +159,11 @@ class Repository:
             operation_columns = {row["name"] for row in db.execute("PRAGMA table_info(operations)")}
             if "status" not in operation_columns:
                 db.execute("ALTER TABLE operations ADD COLUMN status TEXT NOT NULL DEFAULT 'Completado' CHECK(status IN ('Completado', 'Deshecho', 'Fallido'))")
-                for row in db.execute("SELECT * FROM operations ORDER BY id"):
-                    if row["undone_at"] is not None and row["operation_type"] == "move":
-                        db.execute("UPDATE operations SET status = 'Deshecho' WHERE id = ?", (row["id"],))
-                    else:
-                        original = Path(row["original_path"])
-                        destination = Path(row["destination_path"])
-                        try:
-                            verify_transfer(original, destination)
-                        except OSError:
-                            db.execute("UPDATE operations SET status = 'Fallido' WHERE id = ?", (row["id"],))
-                            if row["operation_type"] == "move":
-                                try:
-                                    db.execute("UPDATE files SET path = ?, path_key = ?, name = ?, status = 'Pendiente' WHERE id = ? AND path = ? AND status = 'Organizado'", (str(original), path_key(original), original.name, row["file_id"], str(destination)))
-                                except sqlite3.IntegrityError:
-                                    db.execute("UPDATE files SET status = 'Pendiente' WHERE id = ? AND status = 'Organizado'", (row["file_id"],))
-                                    logger.warning("La ruta original ya está ocupada por otro registro: operación %s", row["id"])
-                            logger.warning("Operación antigua no verificable: %s", row["id"])
+                # Legacy operations describe the event when it was recorded.
+                # Current disk availability is classified during reconciliation.
+                db.execute("UPDATE operations SET status = 'Deshecho' WHERE undone_at IS NOT NULL AND operation_type = 'move'")
             if "error_message" not in operation_columns:
                 db.execute("ALTER TABLE operations ADD COLUMN error_message TEXT")
-                db.execute("UPDATE operations SET error_message = 'No se pudo verificar el movimiento registrado por la versión anterior.' WHERE status = 'Fallido' AND error_message IS NULL")
 
             db.execute("CREATE INDEX IF NOT EXISTS idx_files_index_state_folder ON files(index_state, watched_folder_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_operations_file_id ON operations(file_id)")
@@ -276,16 +261,20 @@ class Repository:
         """Retain historical rows while classifying their current index state."""
         policy = ExclusionPolicy()
         with connect(self.db_path) as db:
-            rows = db.execute("""SELECT f.id, f.path, f.status, f.index_state,
+            rows = db.execute("""SELECT f.id, f.path, f.path_key, f.status, f.index_state,
                 EXISTS(SELECT 1 FROM operations o WHERE o.file_id = f.id AND o.operation_type = 'move'
                     AND o.status = 'Completado' AND o.destination_path = f.path) AS verified_move
                 FROM files f WHERE f.watched_folder_id = ?""", (folder.id,)).fetchall()
             changes: list[tuple[str, int]] = []
             counts = {"active": 0, "missing": 0, "excluded": 0}
+            canonical_keys = {row["path_key"] for row in rows}
             for row in rows:
                 path = Path(row["path"])
                 verified_organized = row["status"] == "Organizado" and bool(row["verified_move"])
-                if policy.excluded_name(path) or path.is_symlink():
+                legacy_key = row["path_key"]
+                duplicate_legacy = (legacy_key != path_key(path) and legacy_key.endswith(f"#legacy-{row['id']}")
+                                    and legacy_key.rsplit("#legacy-", 1)[0] in canonical_keys)
+                if duplicate_legacy or policy.excluded_name(path) or path.is_symlink():
                     state = "excluded"
                 elif not verified_organized and not policy.eligible_path(
                     path, folder.path, folder.include_subfolders, managed_roots, assume_regular=True
@@ -344,7 +333,7 @@ class Repository:
                 content_clause = self.content.search_clause(search)
                 if content_clause:
                     search_parts.append(content_clause[0])
-                    values.append(content_clause[1])
+                    values.extend(content_clause[1])
             clauses.append("(" + " OR ".join(search_parts) + ")" if search_parts else "0")
         if status != "Todos":
             clauses.append("status = ?")

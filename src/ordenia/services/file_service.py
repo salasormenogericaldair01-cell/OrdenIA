@@ -17,6 +17,7 @@ from ordenia.monitoring.watcher import FolderWatcher
 from ordenia.platform.actions import default_central_root
 from ordenia.scanning.scanner import FileScanner
 from ordenia.services.content_service import ContentService
+from ordenia.services.file_locks import FileOperationLocks
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,8 @@ class FileService(QObject):
         self.scanner = FileScanner()
         self._closing = threading.Event()
         self.scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="OrdenIA scans")
-        self.content = ContentService(repository)
+        self.file_locks = FileOperationLocks()
+        self.content = ContentService(repository, operation_locks=self.file_locks)
         self.content.changed.connect(self.changed.emit)
         self.watcher = FolderWatcher(repository, ExtensionClassifier(), self.changed.emit, self._on_watcher_indexed)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="OrdenIA moves")
@@ -220,6 +222,10 @@ class FileService(QObject):
         self.executor.submit(self._organize, file_id)
 
     def _organize(self, file_id: int) -> None:
+        with self.file_locks.hold(file_id):
+            self._organize_locked(file_id)
+
+    def _organize_locked(self, file_id: int) -> None:
         file: DetectedFile | None = None
         planned: Path | None = None
         destination: Path | None = None
@@ -266,6 +272,16 @@ class FileService(QObject):
         self.executor.submit(self._undo, operation_id)
 
     def _undo(self, operation_id: int) -> None:
+        try:
+            operation = self.repository.get_operation(operation_id)
+        except Exception as exc:
+            logger.exception("No se pudo cargar la operación %s para deshacer", operation_id)
+            self.error.emit(f"No se pudo deshacer el movimiento: {exc}")
+            return
+        with self.file_locks.hold(operation.file_id):
+            self._undo_locked(operation_id)
+
+    def _undo_locked(self, operation_id: int) -> None:
         operation: Operation | None = None
         restored: Path | None = None
         failure: str | None = None

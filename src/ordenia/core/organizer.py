@@ -13,63 +13,123 @@ logger = logging.getLogger(__name__)
 
 
 def verify_transfer(source: Path, destination: Path) -> None:
-    """Require the real file at destination and no entry at its old path."""
+    """Check the final path transition; copy integrity is checked before unlink."""
     if not destination.is_file() or destination.is_symlink():
         raise OSError(f"El archivo no existe en el destino: {destination}")
     if source.exists() or source.is_symlink():
         raise OSError(f"El archivo todavía existe en el origen: {source}")
 
 
+def _same_source(path: Path, original: os.stat_result) -> bool:
+    try:
+        current = path.stat()
+        return (path.is_file() and not path.is_symlink()
+                and (current.st_size, current.st_mtime_ns, current.st_dev, current.st_ino)
+                == (original.st_size, original.st_mtime_ns, original.st_dev, original.st_ino))
+    except OSError:
+        return False
+
+
+def _verify_copy(path: Path, expected_size: int) -> None:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size != expected_size:
+        raise OSError(f"La copia no está completa: {path}")
+
+
+def _copy_to_stage(source: Path, staged: Path) -> None:
+    with source.open("rb") as incoming, staged.open("xb") as outgoing:
+        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
+        outgoing.flush()
+        os.fsync(outgoing.fileno())
+    shutil.copystat(source, staged)
+
+
 def _move_without_replacing(source: Path, target: Path) -> Path:
-    """Use shutil.move for staging, then publish under an exclusive name."""
+    """Keep source intact until a verified copy is published on the target volume."""
+    if not source.is_file() or source.is_symlink():
+        raise FileNotFoundError(source)
+    original = source.stat()
     target.parent.mkdir(parents=True, exist_ok=True)
     stage_dir = Path(tempfile.mkdtemp(prefix=".ordenia-", dir=target.parent))
     staged = stage_dir / source.name
-    moved_to_stage = False
     published: Path | None = None
+    published_identity: tuple[int, int] | None = None
+    completed = False
     try:
-        shutil.move(str(source), str(staged))
-        moved_to_stage = True
+        try:
+            # Same volume: a hard link avoids copying while retaining source.
+            os.link(source, staged)
+        except OSError:
+            # Different volume (or no hard-link support): copy on the destination
+            # volume. A partial copy never removes the original.
+            _copy_to_stage(source, staged)
+        _verify_copy(staged, original.st_size)
+        if not _same_source(source, original):
+            raise OSError("El archivo de origen cambió durante la copia.")
+
         while True:
             candidate = available_path(target)
             try:
-                # Hard-link creation is atomic and fails if a name appeared meanwhile.
+                # Staging and candidate are on the same volume. link() publishes
+                # atomically and fails instead of replacing an occupied name.
                 os.link(staged, candidate)
             except FileExistsError:
                 continue
             except OSError:
-                # Some Windows volumes do not support hard links. 'xb' is exclusive.
+                if os.name != "nt":
+                    raise
+                # On Windows rename() is atomic and raises if destination exists.
                 try:
-                    with staged.open("rb") as incoming, candidate.open("xb") as outgoing:
-                        shutil.copyfileobj(incoming, outgoing)
-                    shutil.copystat(staged, candidate)
+                    os.rename(staged, candidate)
                 except FileExistsError:
                     continue
-                except Exception:
-                    if candidate.exists():
-                        candidate.unlink()
-                    raise
             published = candidate
-            moved_to_stage = False
-            return candidate
+            stat = candidate.stat()
+            published_identity = (stat.st_dev, stat.st_ino)
+            break
+
+        _verify_copy(published, original.st_size)
+        if not _same_source(source, original):
+            raise OSError("El archivo de origen cambió antes de completar el movimiento.")
+        try:
+            source.unlink()
+        except OSError:
+            if source.exists() or source.is_symlink():
+                raise
+            # A filesystem may report an error after deleting the entry. The
+            # verified destination is already recoverable in that case.
+        completed = True
+        return published
     finally:
-        if published is not None and staged.exists():
-            try:
-                staged.unlink()
-            except OSError:
-                logger.warning("El archivo se movió, pero no se pudo limpiar el temporal %s", staged, exc_info=True)
-        elif moved_to_stage and staged.exists():
-            rollback = available_path(source)
-            try:
-                shutil.move(str(staged), str(rollback))
-                logger.warning("Movimiento revertido a %s", rollback)
-            except OSError:
-                logger.exception("No se pudo restaurar %s; quedó en %s", source, staged)
-        elif published is None and staged.exists():
-            # A failed cross-volume copy may leave only a partial staging file.
-            staged.unlink()
-        if not any(stage_dir.iterdir()):
+        if completed:
+            # Never remove staging if the destination unexpectedly vanished.
+            if published is not None and published.is_file() and staged.exists():
+                try:
+                    staged.unlink()
+                except OSError:
+                    logger.warning("No se pudo limpiar el staging %s", staged, exc_info=True)
+        elif _same_source(source, original):
+            # The original is still complete. Remove only the publication we
+            # created, and retain anything whose identity has changed.
+            if published is not None and published_identity is not None:
+                try:
+                    stat = published.stat()
+                    if (stat.st_dev, stat.st_ino) == published_identity:
+                        published.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.warning("No se pudo limpiar la publicación %s", published, exc_info=True)
+            if staged.exists():
+                try:
+                    staged.unlink()
+                except OSError:
+                    logger.warning("No se pudo limpiar el staging %s", staged, exc_info=True)
+        else:
+            logger.error("Origen alterado o ausente; se conserva staging en %s", staged)
+        try:
             stage_dir.rmdir()
+        except OSError:
+            pass
 
 
 class Organizer:

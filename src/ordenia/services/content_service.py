@@ -13,6 +13,7 @@ from ordenia.analysis import ContentAnalyzer
 from ordenia.analysis.models import AnalysisOutcome
 from ordenia.core.exclusions import ExclusionPolicy
 from ordenia.database.repositories import Repository
+from ordenia.services.file_locks import FileOperationLocks
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,11 @@ class ContentService(QObject):
     progress = Signal(int, int, int)  # job, finished, total
     finished = Signal(int, int, int)
 
-    def __init__(self, repository: Repository, workers: int = 2) -> None:
+    def __init__(self, repository: Repository, workers: int = 2,
+                 operation_locks: FileOperationLocks | None = None) -> None:
         super().__init__()
         self.repository = repository
+        self.operation_locks = operation_locks or FileOperationLocks()
         self.analyzer = ContentAnalyzer()
         self._queue: queue.Queue[_Task | None] = queue.Queue()
         self._lock = threading.Lock()
@@ -133,6 +136,10 @@ class ContentService(QObject):
                     self.request([file_id], automatic=True)
 
     def _process(self, file_id: int, force: bool, automatic: bool) -> None:
+        with self.operation_locks.hold(file_id):
+            self._process_locked(file_id, force, automatic)
+
+    def _process_locked(self, file_id: int, force: bool, automatic: bool) -> None:
         file = self.repository.get_file(file_id)
         if file.index_state != "active":
             return
@@ -179,10 +186,13 @@ class ContentService(QObject):
         latest = self.repository.get_file(file_id)
         try:
             latest_stat = latest.path.stat()
-            stale = latest.index_state != "active" or (latest_stat.st_size, latest_stat.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns)
+            stale = (latest.index_state != "active" or latest.path != path
+                     or (latest_stat.st_size, latest_stat.st_mtime_ns, latest_stat.st_dev, latest_stat.st_ino)
+                     != (stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino))
         except OSError:
             stale = True
-        self.repository.content.save(file_id, outcome, stat.st_size, stat.st_mtime_ns, stale=stale)
+        self.repository.content.save(file_id, outcome, stat.st_size, stat.st_mtime_ns,
+                                     stale=stale, expected_path=path)
         self._emit_changed()
 
     def close(self) -> None:
