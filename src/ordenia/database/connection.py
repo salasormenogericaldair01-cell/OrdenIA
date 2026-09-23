@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -12,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 _configured_paths: set[str] = set()
 _configuration_lock = threading.Lock()
+
+
+def _fold(value: object) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value).casefold())
+    return "".join(character for character in normalized if not unicodedata.combining(character))
 
 
 def initialize_database(db_path: Path) -> str:
@@ -38,6 +44,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(db_path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.create_function("CASEFOLD", 1, lambda value: str(value).casefold(), deterministic=True)
+    connection.create_function("FOLD", 1, _fold, deterministic=True)
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 10000")
     # synchronous is connection-scoped; setting it is cheap and does not

@@ -79,7 +79,10 @@ class OllamaProvider(AIProvider):
         except (ProviderUnavailable, ProviderTimeout) as exc:
             return ProviderStatus(self.name, False, (), str(exc))
 
-    def generate(self, system_prompt: str, user_prompt: str, model: str) -> AIResponse:
+    def _generate_with_schema(
+        self, system_prompt: str, user_prompt: str, model: str,
+        schema: dict[str, object],
+    ) -> AIResponse:
         if not model.strip():
             raise ModelNotInstalled("Configura un modelo local de Ollama.")
         payload = self._request("/api/chat", data={
@@ -89,7 +92,7 @@ class OllamaProvider(AIProvider):
                 {"role": "user", "content": user_prompt},
             ],
             "think": False,
-            "format": SUGGESTION_JSON_SCHEMA,
+            "format": schema,
             "stream": False,
             "keep_alive": "5m",
             "options": {"temperature": 0.1, "num_predict": self.MAX_PREDICT_TOKENS},
@@ -105,3 +108,12 @@ class OllamaProvider(AIProvider):
             eval_count=int(payload.get("eval_count") or 0),
             eval_seconds=float(payload.get("eval_duration") or 0) / 1_000_000_000,
         )
+
+    def generate(self, system_prompt: str, user_prompt: str, model: str) -> AIResponse:
+        return self._generate_with_schema(system_prompt, user_prompt, model, SUGGESTION_JSON_SCHEMA)
+
+    def generate_structured(
+        self, system_prompt: str, user_prompt: str, model: str,
+        schema: dict[str, object],
+    ) -> AIResponse:
+        return self._generate_with_schema(system_prompt, user_prompt, model, schema)

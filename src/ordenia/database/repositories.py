@@ -14,6 +14,8 @@ from ordenia.core.organizer import verify_transfer
 from .connection import connect, initialize_database
 from .ai import AIRepository
 from .content import ContentRepository
+from .candidates import CandidateRepository
+from .plans import PlanRepository
 from .models import DetectedFile, IndexedEntry, Operation, WatchedFolder
 
 logger = logging.getLogger(__name__)
@@ -73,6 +75,8 @@ class Repository:
         self.journal_mode = initialize_database(db_path)
         self.content = ContentRepository(db_path)
         self.ai = AIRepository(db_path)
+        self.candidates = CandidateRepository(db_path, self.content)
+        self.plans = PlanRepository(db_path)
         self._initialize()
 
     def _initialize(self) -> None:
@@ -172,6 +176,7 @@ class Repository:
             db.execute("CREATE INDEX IF NOT EXISTS idx_operations_file_id ON operations(file_id)")
             self.content.initialize(db)
             self.ai.initialize(db)
+            self.plans.initialize(db)
 
     def list_folders(self) -> list[WatchedFolder]:
         with connect(self.db_path) as db:

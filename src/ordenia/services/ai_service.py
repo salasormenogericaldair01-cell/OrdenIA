@@ -17,6 +17,7 @@ from ordenia.ai.providers import AIProvider, ModelNotInstalled, OllamaProvider, 
 from ordenia.database.repositories import Repository
 from ordenia.services.content_service import ContentService
 from ordenia.services.file_locks import FileOperationLocks
+from ordenia.services.local_inference import LOCAL_INFERENCE_GATE
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,8 @@ class AIService(QObject):
             context = self.context_builder.build(task.file_id)
         self.repository.ai.set_status(task.file_id, "analyzing", provider=self.provider.name, model=model)
         self.changed.emit(task.file_id)
-        response = self.provider.generate(SYSTEM_PROMPT, user_prompt(context), model)
+        with LOCAL_INFERENCE_GATE.hold():
+            response = self.provider.generate(SYSTEM_PROMPT, user_prompt(context), model)
         suggestion = parse_suggestion(response.content)
         if self._cancelled(task.job_id):
             self.repository.ai.set_status(task.file_id, "pending", error="Análisis cancelado.")

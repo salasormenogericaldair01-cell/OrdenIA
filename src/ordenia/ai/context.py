@@ -1,10 +1,10 @@
 """Build compact, deterministic context from the local content index."""
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from .models import AIContext
+from ordenia.core.destination_catalog import existing_relative_paths
 
 if TYPE_CHECKING:
     from ordenia.database.repositories import Repository
@@ -63,31 +63,7 @@ class ContentContextBuilder:
         self.max_characters = max(1000, max_characters)
 
     def _existing_paths(self) -> tuple[str, ...]:
-        result: list[str] = []
-        seen: set[str] = set()
-        for root in self.roots():
-            try:
-                root = root.resolve()
-                if not root.is_dir():
-                    continue
-            except OSError:
-                continue
-            for current, directories, _files in os.walk(root, followlinks=False):
-                current_path = Path(current)
-                try:
-                    depth = len(current_path.relative_to(root).parts)
-                except ValueError:
-                    continue
-                directories[:] = sorted(directories, key=str.casefold) if depth < 3 else []
-                for directory in directories:
-                    relative = (current_path / directory).relative_to(root).as_posix()
-                    key = relative.casefold()
-                    if key not in seen:
-                        seen.add(key)
-                        result.append(relative)
-                        if len(result) >= MAX_EXISTING_PATHS:
-                            return tuple(result)
-        return tuple(result)
+        return existing_relative_paths(self.roots(), limit=MAX_EXISTING_PATHS)
 
     def build(self, file_id: int) -> AIContext:
         file = self.repository.get_file(file_id)
